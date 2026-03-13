@@ -56,33 +56,29 @@ class ExpertStore:
         self.down_bias: list[torch.Tensor] = []
 
     def load(self):
-        """Load all expert weights into pinned CPU memory."""
-        print(f"Loading experts from {self.weights_dir}...")
+        """Load all expert weights via mmap (zero-copy from disk).
+
+        Uses safetensors mmap so tensors are backed by the file system.
+        Pages are faulted in on first access and can be evicted by the OS
+        under memory pressure — no OOM risk.
+        """
+        print(f"Loading experts from {self.weights_dir} (mmap)...")
+        # Keep file handles alive so mmap stays valid
+        self._handles: list = []
         for layer_idx in range(NUM_LAYERS):
             path = self.weights_dir / f"experts_L{layer_idx:02d}.safetensors"
-            with safe_open(str(path), framework="pt", device="cpu") as f:
-                gu_b = f.get_tensor("gate_up_proj_blocks").pin_memory()
-                gu_s = f.get_tensor("gate_up_proj_scales").pin_memory()
-                gu_bias = f.get_tensor("gate_up_proj_bias").pin_memory()
-                dn_b = f.get_tensor("down_proj_blocks").pin_memory()
-                dn_s = f.get_tensor("down_proj_scales").pin_memory()
-                dn_bias = f.get_tensor("down_proj_bias").pin_memory()
+            f = safe_open(str(path), framework="pt", device="cpu")
+            self._handles.append(f)
 
-            self.gate_up_blocks.append(gu_b)
-            self.gate_up_scales.append(gu_s)
-            self.gate_up_bias.append(gu_bias)
-            self.down_blocks.append(dn_b)
-            self.down_scales.append(dn_s)
-            self.down_bias.append(dn_bias)
+            self.gate_up_blocks.append(f.get_tensor("gate_up_proj_blocks"))
+            self.gate_up_scales.append(f.get_tensor("gate_up_proj_scales"))
+            self.gate_up_bias.append(f.get_tensor("gate_up_proj_bias"))
+            self.down_blocks.append(f.get_tensor("down_proj_blocks"))
+            self.down_scales.append(f.get_tensor("down_proj_scales"))
+            self.down_bias.append(f.get_tensor("down_proj_bias"))
 
             if (layer_idx + 1) % 12 == 0 or layer_idx == NUM_LAYERS - 1:
-                loaded_gb = sum(
-                    t.nbytes for tensors in [
-                        self.gate_up_blocks, self.gate_up_scales, self.gate_up_bias,
-                        self.down_blocks, self.down_scales, self.down_bias,
-                    ] for t in tensors
-                ) / 1024**3
-                print(f"  Loaded {layer_idx + 1}/{NUM_LAYERS} layers ({loaded_gb:.1f} GB pinned)")
+                print(f"  Mapped {layer_idx + 1}/{NUM_LAYERS} layers")
 
     def copy_to_buffer(
         self,

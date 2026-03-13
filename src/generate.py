@@ -21,7 +21,7 @@ def generate(
     input_ids = tokenizer.encode(prompt, return_tensors="pt").to(model.device)
     batch, prompt_len = input_ids.shape
 
-    model.reset_kv_cache()
+    model.reset()
 
     # Prefill: process entire prompt
     position_ids = torch.arange(prompt_len, device=model.device).unsqueeze(0)
@@ -68,8 +68,7 @@ def generate(
     print(f"\nDecode: {n_tokens} tokens in {decode_time:.2f}s ({n_tokens / decode_time:.1f} tok/s)")
     print(f"  Breakdown: attn={total_timings['attn']:.2f}s, "
           f"router={total_timings['router']:.2f}s, "
-          f"transfer={total_timings['transfer']:.2f}s, "
-          f"expert_compute={total_timings['expert_compute']:.2f}s")
+          f"experts={total_timings['experts']:.2f}s")
 
     output_ids = input_ids[0].tolist() + generated
     return tokenizer.decode(output_ids, skip_special_tokens=True)

@@ -38,20 +38,14 @@ def dequant_mxfp4(
 
     out = torch.empty(rows_total, B * 2, dtype=dtype, device=device)
 
-    # Chunk processing to control memory (matches HF implementation)
-    chunk = 32768 * 1024
-    for r0 in range(0, rows_total, chunk):
-        r1 = min(r0 + chunk, rows_total)
-        blk = blocks_flat[r0:r1]
-        exp = scales_flat[r0:r1]
+    # Process all rows — single expert fits in VRAM easily
+    idx_lo = (blocks_flat & 0x0F).to(torch.int32)
+    idx_hi = (blocks_flat >> 4).to(torch.int32)
 
-        idx_lo = (blk & 0x0F).to(torch.long)
-        idx_hi = (blk >> 4).to(torch.long)
-
-        sub = out[r0:r1]
-        sub[:, 0::2] = lut[idx_lo]
-        sub[:, 1::2] = lut[idx_hi]
-        torch.ldexp(sub, exp, out=sub)
+    out[:, 0::2] = lut[idx_lo]
+    out[:, 1::2] = lut[idx_hi]
+    torch.ldexp(out, scales_flat, out=out)
+    del idx_lo, idx_hi
 
     out = out.reshape(*prefix_shape, G, B * 2).view(*prefix_shape, G * B * 2)
     return out.transpose(-2, -1).contiguous()

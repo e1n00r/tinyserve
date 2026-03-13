@@ -61,7 +61,7 @@ class OffloadedGptOss:
 
         # Auto-size cache from remaining VRAM
         if cache_capacity is None and pipeline:
-            reserved = 256 * 1024 * 1024  # 256 MB headroom for KV, buffers, activations
+            reserved = 512 * 1024 * 1024  # 512 MB headroom for dequant temps, KV, activations
             free_mem = torch.cuda.mem_get_info(self.device)[0] - reserved
             cache_capacity = ExpertLRUCache.estimate_capacity(max(0, free_mem))
             print(f"  Auto-sized expert LRU cache: {cache_capacity} experts "
