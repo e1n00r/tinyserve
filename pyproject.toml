@@ -1,0 +1,14 @@
+[project]
+name = "gpt-oss-offload"
+version = "0.1.0"
+description = "GPU-compute MoE expert offloading for GPT-OSS-120B on consumer GPUs"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.6",
+    "transformers>=4.50",
+    "safetensors>=0.4",
+    "huggingface-hub>=0.25",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
