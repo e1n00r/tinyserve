@@ -1,4 +1,4 @@
-"""Offloaded GPT-OSS-120B with hybrid KV cache and blocking expert loading."""
+"""Offloaded GPT-OSS-120B with hybrid KV cache and pipelined expert loading."""
 
 import time
 
@@ -17,6 +17,7 @@ from .config import (
 from .expert_store import ExpertBuffer, ExpertStore
 from .experts import expert_forward
 from .kv_cache import HybridKVCache
+from .pipeline import ExpertPipeline
 from .rope import build_rope_cache
 
 
@@ -24,13 +25,14 @@ class OffloadedGptOss:
     """GPT-OSS-120B with expert weights in CPU pinned memory.
 
     Non-expert weights (attention, embeddings, router, norms) live on GPU.
-    Expert weights are loaded to GPU on demand.
+    Expert weights are loaded to GPU on demand via double-buffered pipeline.
     KV cache: sliding-window layers on GPU, full-attention layers on CPU.
     """
 
-    def __init__(self, weights_dir: str, device: str = "cuda"):
+    def __init__(self, weights_dir: str, device: str = "cuda", pipeline: bool = True):
         self.device = torch.device(device)
         self.dtype = torch.bfloat16
+        self.use_pipeline = pipeline
 
         print("Loading non-expert weights to GPU...")
         ne_path = f"{weights_dir}/non_expert.safetensors"
@@ -41,13 +43,16 @@ class OffloadedGptOss:
         self.expert_store = ExpertStore(weights_dir)
         self.expert_store.load()
 
-        self.expert_buf = ExpertBuffer(self.device)
+        if pipeline:
+            self.expert_pipeline = ExpertPipeline(self.expert_store, self.device)
+        else:
+            self.expert_buf = ExpertBuffer(self.device)
 
         self.cos_cache, self.sin_cache = build_rope_cache(self.device, self.dtype)
-
         self.kv_cache = HybridKVCache(self.device)
 
-        print("Model ready.")
+        mode = "pipelined" if pipeline else "blocking"
+        print(f"Model ready ({mode} expert loading).")
 
     def _w(self, key: str) -> torch.Tensor:
         return self.weights[key]
@@ -60,22 +65,11 @@ class OffloadedGptOss:
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Forward pass.
-
-        Args:
-            input_ids: [batch, seq_len]
-            position_ids: [batch, seq_len]
-
-        Returns:
-            (logits, timings_dict)
-        """
         batch, seq_len = input_ids.shape
-        timings = {"attn": 0.0, "router": 0.0, "transfer": 0.0, "expert_compute": 0.0}
+        timings = {"attn": 0.0, "router": 0.0, "experts": 0.0}
 
-        # Embedding
         h = F.embedding(input_ids, self._w("model.embed_tokens.weight"))
 
-        # RoPE
         cos = self.cos_cache[position_ids]
         sin = self.sin_cache[position_ids]
 
@@ -83,13 +77,10 @@ class OffloadedGptOss:
             p = f"model.layers.{li}"
             residual = h
 
-            # Pre-attn norm + attention
             h = rms_norm(h, self._w(f"{p}.input_layernorm.weight"))
 
             t0 = time.perf_counter()
             sliding = SLIDING_WINDOW if LAYER_TYPES[li] == "sliding_attention" else None
-
-            # Get past KV (transfers CPU→GPU for full-attn layers)
             past_kv = self.kv_cache.get_kv(li)
 
             h_attn, new_k, new_v = attention_forward(
@@ -108,7 +99,6 @@ class OffloadedGptOss:
                 sliding,
             )
 
-            # Store new KV (GPU for sliding, CPU for full-attn)
             self.kv_cache.update(li, new_k, new_v)
             h = residual + h_attn
             timings["attn"] += time.perf_counter() - t0
@@ -117,7 +107,6 @@ class OffloadedGptOss:
             residual = h
             h = rms_norm(h, self._w(f"{p}.post_attention_layernorm.weight"))
 
-            # Router
             t0 = time.perf_counter()
             router_logits = F.linear(
                 h.reshape(-1, HIDDEN_SIZE),
@@ -128,38 +117,51 @@ class OffloadedGptOss:
             routing_weights = F.softmax(top_vals, dim=-1, dtype=top_vals.dtype)
             timings["router"] += time.perf_counter() - t0
 
-            # Expert computation (blocking)
+            # Expert computation
+            t0 = time.perf_counter()
             h_flat = h.reshape(-1, HIDDEN_SIZE)
-            expert_out = torch.zeros_like(h_flat)
 
-            for tok in range(h_flat.shape[0]):
-                for k in range(NUM_EXPERTS_PER_TOK):
-                    eidx = top_idx[tok, k].item()
-                    w = routing_weights[tok, k]
-
-                    t0 = time.perf_counter()
-                    self.expert_store.copy_to_buffer(
-                        self.expert_buf, li, eidx, non_blocking=False
-                    )
-                    timings["transfer"] += time.perf_counter() - t0
-
-                    t0 = time.perf_counter()
-                    out = expert_forward(
-                        h_flat[tok:tok + 1],
-                        self.expert_buf.gate_up_blocks,
-                        self.expert_buf.gate_up_scales,
-                        self.expert_buf.gate_up_bias,
-                        self.expert_buf.down_blocks,
-                        self.expert_buf.down_scales,
-                        self.expert_buf.down_bias,
-                        dtype=self.dtype,
-                    )
-                    expert_out[tok] += w * out.squeeze(0)
-                    timings["expert_compute"] += time.perf_counter() - t0
+            if self.use_pipeline:
+                expert_out = self.expert_pipeline.execute_layer_experts(
+                    h_flat, li, top_idx, routing_weights,
+                )
+            else:
+                expert_out = self._blocking_experts(
+                    h_flat, li, top_idx, routing_weights,
+                )
 
             h = residual + expert_out.view_as(h)
+            timings["experts"] += time.perf_counter() - t0
 
-        # Final norm + lm_head
         h = rms_norm(h, self._w("model.norm.weight"))
         logits = F.linear(h, self._w("lm_head.weight"))
         return logits, timings
+
+    def _blocking_experts(
+        self,
+        h_flat: torch.Tensor,
+        layer_idx: int,
+        top_idx: torch.Tensor,
+        routing_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Fallback: blocking expert loading (Phase 2 behavior)."""
+        expert_out = torch.zeros_like(h_flat)
+        for tok in range(h_flat.shape[0]):
+            for k in range(NUM_EXPERTS_PER_TOK):
+                eidx = top_idx[tok, k].item()
+                w = routing_weights[tok, k]
+                self.expert_store.copy_to_buffer(
+                    self.expert_buf, layer_idx, eidx, non_blocking=False
+                )
+                out = expert_forward(
+                    h_flat[tok:tok + 1],
+                    self.expert_buf.gate_up_blocks,
+                    self.expert_buf.gate_up_scales,
+                    self.expert_buf.gate_up_bias,
+                    self.expert_buf.down_blocks,
+                    self.expert_buf.down_scales,
+                    self.expert_buf.down_bias,
+                    dtype=self.dtype,
+                )
+                expert_out[tok] += w * out.squeeze(0)
+        return expert_out
