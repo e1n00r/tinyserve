@@ -156,7 +156,7 @@ class OffloadedGptOss:
 
         w_fp8 = torch.empty_like(w, dtype=torch.float8_e4m3fn)
         for start in range(0, w.shape[0], chunk):
-            end = min(start + w.shape[0], w.shape[0])
+            end = min(start + chunk, w.shape[0])
             w_fp8[start:end] = (w[start:end] / lm_scale).to(torch.float8_e4m3fn)
 
         self.weights[key] = w_fp8
@@ -190,6 +190,7 @@ class OffloadedGptOss:
         cos = self.cos_cache[position_ids]
         sin = self.sin_cache[position_ids]
 
+        deferred = []  # deferred expert futures from previous layer
         for li in range(NUM_LAYERS):
             p = f"model.layers.{li}"
             residual = h
@@ -241,16 +242,24 @@ class OffloadedGptOss:
             h_flat = h.reshape(-1, HIDDEN_SIZE)
 
             if self.use_pipeline:
-                expert_out = self.expert_pipeline.execute_layer_experts(
+                expert_out, deferred = self.expert_pipeline.execute_layer_experts(
                     h_flat, li, top_idx, routing_weights,
+                    deferred_results=deferred,
                 )
             else:
                 expert_out = self._blocking_experts(
                     h_flat, li, top_idx, routing_weights,
                 )
+                deferred = []
 
             h = residual + expert_out.view_as(h)
             timings["experts"] += time.perf_counter() - t0
+
+        # Apply any remaining deferred corrections after last layer
+        if deferred:
+            for weight, future in deferred:
+                cpu_out = future.result()
+                h[:, -1:, :] += (weight * cpu_out.to(self.device).to(self.dtype)).view(1, 1, -1)
 
         h = rms_norm(h, self._w("model.norm.weight"))
         # FP8 lm_head via _scaled_mm

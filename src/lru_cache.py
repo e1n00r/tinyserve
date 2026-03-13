@@ -69,6 +69,10 @@ class ExpertLRUCache:
         self.misses += 1
         return None
 
+    def contains(self, layer_idx: int, expert_idx: int) -> bool:
+        """Check if expert is cached without modifying LRU order or stats."""
+        return (layer_idx, expert_idx) in self._lru
+
     def allocate(self, layer_idx: int, expert_idx: int) -> int:
         """Allocate a cache slot for a new expert, evicting LRU if full.
 
