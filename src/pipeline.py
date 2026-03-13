@@ -1,8 +1,10 @@
-"""Double-buffered expert pipeline with CUDA streams and LRU cache.
+"""Expert pipeline with CUDA streams and LRU cache.
 
-Overlaps expert PCIe transfer with expert GPU compute using two streams.
-Cache hits skip PCIe entirely — expert data is read directly from the
-LRU cache's pre-allocated GPU memory.
+With Triton fused kernel, compute (0.4ms) << transfer (2ms), so the pipeline
+pre-loads the next expert while computing the current one.
+
+Cache hits skip PCIe entirely — Triton reads MXFP4 directly from VRAM cache,
+no intermediate bf16 materialization needed.
 """
 
 import torch
@@ -14,7 +16,11 @@ from .lru_cache import ExpertLRUCache
 
 
 class ExpertPipeline:
-    """Double-buffered expert execution with LRU cache and overlapped transfer."""
+    """Pipelined expert execution with VRAM LRU cache.
+
+    Cache hits: compute directly from VRAM (0.4ms).
+    Cache misses: PCIe transfer + compute, pipelined across misses (2ms + overlap).
+    """
 
     def __init__(
         self,
@@ -26,15 +32,12 @@ class ExpertPipeline:
         self.device = device
         self.dtype = torch.bfloat16
 
-        # Two GPU buffers for double-buffering PCIe transfers
         self.buf_a = ExpertBuffer(device)
         self.buf_b = ExpertBuffer(device)
 
-        # CUDA streams
         self.transfer_stream = torch.cuda.Stream(device)
         self.compute_stream = torch.cuda.Stream(device)
 
-        # LRU cache (optional, capacity=0 disables)
         self.cache = ExpertLRUCache(cache_capacity, device) if cache_capacity > 0 else None
 
     def execute_layer_experts(
@@ -59,32 +62,6 @@ class ExpertPipeline:
 
         return expert_output
 
-    def _compute_expert_from_cache(
-        self,
-        h: torch.Tensor,
-        slot: int,
-    ) -> torch.Tensor:
-        """Run expert forward using data from the LRU cache slot."""
-        return expert_forward(
-            h,
-            self.cache.gate_up_blocks[slot],
-            self.cache.gate_up_scales[slot],
-            self.cache.gate_up_bias[slot],
-            self.cache.down_blocks[slot],
-            self.cache.down_scales[slot],
-            self.cache.down_bias[slot],
-            dtype=self.dtype,
-        )
-
-    def _copy_buf_to_cache(self, buf: ExpertBuffer, slot: int):
-        """Copy expert data from transfer buffer into cache slot (on GPU, fast)."""
-        self.cache.gate_up_blocks[slot].copy_(buf.gate_up_blocks)
-        self.cache.gate_up_scales[slot].copy_(buf.gate_up_scales)
-        self.cache.gate_up_bias[slot].copy_(buf.gate_up_bias)
-        self.cache.down_blocks[slot].copy_(buf.down_blocks)
-        self.cache.down_scales[slot].copy_(buf.down_scales)
-        self.cache.down_bias[slot].copy_(buf.down_bias)
-
     def _execute_token_experts(
         self,
         h: torch.Tensor,
@@ -94,48 +71,86 @@ class ExpertPipeline:
         expert_ids: list[int],
         weights: torch.Tensor,
     ):
-        k = NUM_EXPERTS_PER_TOK
-
         if self.cache is None:
             self._execute_no_cache(h, output, tok_idx, layer_idx, expert_ids, weights)
             return
 
-        # With cache: separate experts into hits and misses, then process
-        # For simplicity, process sequentially but skip PCIe for hits
-        for i in range(k):
-            eid = expert_ids[i]
-            slot = self.cache.lookup(layer_idx, eid)
+        cache = self.cache
+        bufs = [self.buf_a, self.buf_b]
 
+        # Partition into cache hits and misses
+        hits: list[tuple[int, int]] = []    # (position_in_topk, cache_slot)
+        misses: list[int] = []               # position_in_topk
+        for i, eid in enumerate(expert_ids):
+            slot = cache.lookup(layer_idx, eid)
             if slot is not None:
-                # Cache hit — compute directly from cache, no PCIe
-                with torch.cuda.stream(self.compute_stream):
-                    out = self._compute_expert_from_cache(h, slot)
-                    output[tok_idx] += weights[i] * out.squeeze(0)
+                hits.append((i, slot))
             else:
-                # Cache miss — transfer from CPU, compute, then cache
-                self.compute_stream.synchronize()  # ensure previous compute done
+                misses.append(i)
+
+        # Start transferring first miss while we compute hits
+        load_done = None
+        if misses:
+            load_done = torch.cuda.Event()
+            with torch.cuda.stream(self.transfer_stream):
+                self.store.copy_to_buffer(
+                    bufs[0], layer_idx, expert_ids[misses[0]], non_blocking=True
+                )
+                load_done.record(self.transfer_stream)
+
+        # Compute all cache hits (data already in VRAM, overlaps with first miss transfer)
+        with torch.cuda.stream(self.compute_stream):
+            for i, slot in hits:
+                out = expert_forward(
+                    h,
+                    cache.gate_up_blocks[slot],
+                    cache.gate_up_scales[slot],
+                    cache.gate_up_bias[slot],
+                    cache.down_blocks[slot],
+                    cache.down_scales[slot],
+                    cache.down_bias[slot],
+                    dtype=self.dtype,
+                )
+                output[tok_idx] += weights[i] * out.squeeze(0)
+
+        # Compute misses with double-buffer pipeline
+        for mi in range(len(misses)):
+            cur = mi & 1
+            nxt = 1 - cur
+            m = misses[mi]
+            eid = expert_ids[m]
+
+            # Wait for current expert's transfer
+            self.compute_stream.wait_event(load_done)
+
+            # Start next miss transfer (overlaps with current compute)
+            if mi < len(misses) - 1:
+                load_done = torch.cuda.Event()
                 with torch.cuda.stream(self.transfer_stream):
                     self.store.copy_to_buffer(
-                        self.buf_a, layer_idx, eid, non_blocking=True
+                        bufs[nxt], layer_idx, expert_ids[misses[mi + 1]], non_blocking=True
                     )
-                self.transfer_stream.synchronize()
+                    load_done.record(self.transfer_stream)
 
-                with torch.cuda.stream(self.compute_stream):
-                    out = expert_forward(
-                        h,
-                        self.buf_a.gate_up_blocks,
-                        self.buf_a.gate_up_scales,
-                        self.buf_a.gate_up_bias,
-                        self.buf_a.down_blocks,
-                        self.buf_a.down_scales,
-                        self.buf_a.down_bias,
-                        dtype=self.dtype,
-                    )
-                    output[tok_idx] += weights[i] * out.squeeze(0)
+            # Compute current expert + insert into cache
+            with torch.cuda.stream(self.compute_stream):
+                buf = bufs[cur]
+                out = expert_forward(
+                    h,
+                    buf.gate_up_blocks, buf.gate_up_scales, buf.gate_up_bias,
+                    buf.down_blocks, buf.down_scales, buf.down_bias,
+                    dtype=self.dtype,
+                )
+                output[tok_idx] += weights[m] * out.squeeze(0)
 
-                # Insert into cache (GPU→GPU copy, fast)
-                slot = self.cache.allocate(layer_idx, eid)
-                self._copy_buf_to_cache(self.buf_a, slot)
+                # Insert into cache for future reuse
+                slot = cache.allocate(layer_idx, eid)
+                cache.gate_up_blocks[slot].copy_(buf.gate_up_blocks)
+                cache.gate_up_scales[slot].copy_(buf.gate_up_scales)
+                cache.gate_up_bias[slot].copy_(buf.gate_up_bias)
+                cache.down_blocks[slot].copy_(buf.down_blocks)
+                cache.down_scales[slot].copy_(buf.down_scales)
+                cache.down_bias[slot].copy_(buf.down_bias)
 
         self.compute_stream.synchronize()
 
@@ -148,10 +163,9 @@ class ExpertPipeline:
         expert_ids: list[int],
         weights: torch.Tensor,
     ):
-        """Double-buffered pipeline without cache (Phase 3 behavior)."""
+        """Double-buffer pipeline without cache."""
         k = NUM_EXPERTS_PER_TOK
         bufs = [self.buf_a, self.buf_b]
-        compute_done = [torch.cuda.Event() for _ in range(2)]
 
         load_done = torch.cuda.Event()
         with torch.cuda.stream(self.transfer_stream):
@@ -159,34 +173,27 @@ class ExpertPipeline:
             load_done.record(self.transfer_stream)
 
         for i in range(k):
-            cur = i % 2
-            nxt = (i + 1) % 2
+            cur = i & 1
+            nxt = 1 - cur
 
             self.compute_stream.wait_event(load_done)
 
             if i < k - 1:
-                next_load_done = torch.cuda.Event()
+                load_done = torch.cuda.Event()
                 with torch.cuda.stream(self.transfer_stream):
-                    if i >= 1:
-                        self.transfer_stream.wait_event(compute_done[nxt])
                     self.store.copy_to_buffer(
                         bufs[nxt], layer_idx, expert_ids[i + 1], non_blocking=True
                     )
-                    next_load_done.record(self.transfer_stream)
-                load_done = next_load_done
+                    load_done.record(self.transfer_stream)
 
             with torch.cuda.stream(self.compute_stream):
+                buf = bufs[cur]
                 out = expert_forward(
                     h,
-                    bufs[cur].gate_up_blocks,
-                    bufs[cur].gate_up_scales,
-                    bufs[cur].gate_up_bias,
-                    bufs[cur].down_blocks,
-                    bufs[cur].down_scales,
-                    bufs[cur].down_bias,
+                    buf.gate_up_blocks, buf.gate_up_scales, buf.gate_up_bias,
+                    buf.down_blocks, buf.down_scales, buf.down_bias,
                     dtype=self.dtype,
                 )
                 output[tok_idx] += weights[i] * out.squeeze(0)
-                compute_done[cur].record(self.compute_stream)
 
         self.compute_stream.synchronize()

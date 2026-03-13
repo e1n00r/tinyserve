@@ -42,6 +42,7 @@ class ExpertBuffer:
         )
 
 
+
 class ExpertStore:
     """Holds all experts in pinned CPU memory, supports async copy to GPU buffers."""
 
@@ -87,7 +88,7 @@ class ExpertStore:
         expert_idx: int,
         non_blocking: bool = False,
     ):
-        """Copy a single expert's data from CPU pinned memory to GPU buffer."""
+        """Copy a single expert's data from mmap to GPU buffer."""
         buf.gate_up_blocks.copy_(self.gate_up_blocks[layer_idx][expert_idx], non_blocking=non_blocking)
         buf.gate_up_scales.copy_(self.gate_up_scales[layer_idx][expert_idx], non_blocking=non_blocking)
         buf.gate_up_bias.copy_(self.gate_up_bias[layer_idx][expert_idx], non_blocking=non_blocking)

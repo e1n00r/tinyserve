@@ -123,3 +123,107 @@ def attention_forward(
 
     output = F.linear(attn_output, o_proj_w, o_proj_b)
     return output, new_k, new_v
+
+
+def _fp8_linear(
+    x: torch.Tensor,
+    w_fp8: torch.Tensor,
+    scale: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    """Linear with FP8 weight using _scaled_mm."""
+    orig_shape = x.shape
+    x_2d = x.reshape(-1, orig_shape[-1])
+
+    # _scaled_mm requires fp8 inputs; quantize activation on the fly
+    x_amax = x_2d.abs().amax()
+    x_scale = (x_amax / torch.finfo(torch.float8_e4m3fn).max).clamp(min=1e-12)
+    x_fp8 = (x_2d / x_scale).to(torch.float8_e4m3fn)
+
+    out = torch._scaled_mm(
+        x_fp8, w_fp8.t(),
+        scale_a=x_scale.float(),
+        scale_b=scale,
+        out_dtype=torch.bfloat16,
+    )
+
+    if bias is not None:
+        out = out + bias
+
+    return out.reshape(*orig_shape[:-1], out.shape[-1])
+
+
+def attention_forward_fp8(
+    hidden_states: torch.Tensor,
+    q_proj: tuple[torch.Tensor, torch.Tensor],
+    q_proj_b: torch.Tensor,
+    k_proj: tuple[torch.Tensor, torch.Tensor],
+    k_proj_b: torch.Tensor,
+    v_proj: tuple[torch.Tensor, torch.Tensor],
+    v_proj_b: torch.Tensor,
+    o_proj: tuple[torch.Tensor, torch.Tensor],
+    o_proj_b: torch.Tensor,
+    sinks: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    past_kv: tuple[torch.Tensor, torch.Tensor] | None,
+    sliding_window: int | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Attention forward with FP8 weight projections.
+
+    Each proj argument is (weight_fp8, scale) tuple.
+    """
+    batch, seq_len, _ = hidden_states.shape
+
+    q = _fp8_linear(hidden_states, q_proj[0], q_proj[1], q_proj_b)
+    k = _fp8_linear(hidden_states, k_proj[0], k_proj[1], k_proj_b)
+    v = _fp8_linear(hidden_states, v_proj[0], v_proj[1], v_proj_b)
+
+    q = q.view(batch, seq_len, NUM_ATTENTION_HEADS, HEAD_DIM).transpose(1, 2)
+    k = k.view(batch, seq_len, NUM_KV_HEADS, HEAD_DIM).transpose(1, 2)
+    v = v.view(batch, seq_len, NUM_KV_HEADS, HEAD_DIM).transpose(1, 2)
+
+    cos_unsq = cos.unsqueeze(1)
+    sin_unsq = sin.unsqueeze(1)
+    q = apply_rotary_emb(q, cos_unsq, sin_unsq)
+    k = apply_rotary_emb(k, cos_unsq, sin_unsq)
+
+    new_k, new_v = k, v
+
+    if past_kv is not None:
+        past_k, past_v = past_kv
+        k = torch.cat([past_k.to(k.dtype), k], dim=2)
+        v = torch.cat([past_v.to(v.dtype), v], dim=2)
+
+    k_expanded = repeat_kv(k, NUM_KV_GROUPS)
+    v_expanded = repeat_kv(v, NUM_KV_GROUPS)
+
+    scaling = HEAD_DIM ** -0.5
+    attn_weights = torch.matmul(q, k_expanded.transpose(2, 3)) * scaling
+
+    kv_len = k_expanded.shape[2]
+    causal_mask = torch.triu(
+        torch.full((seq_len, kv_len), float("-inf"), device=hidden_states.device, dtype=hidden_states.dtype),
+        diagonal=kv_len - seq_len + 1,
+    )
+
+    if sliding_window is not None:
+        sw_mask = torch.tril(
+            torch.full((seq_len, kv_len), float("-inf"), device=hidden_states.device, dtype=hidden_states.dtype),
+            diagonal=-(sliding_window + 1) + (kv_len - seq_len),
+        )
+        causal_mask = causal_mask + sw_mask
+
+    attn_weights = attn_weights + causal_mask.unsqueeze(0).unsqueeze(0)
+
+    sink_logits = sinks.reshape(1, -1, 1, 1).expand(batch, -1, seq_len, 1)
+    combined = torch.cat([attn_weights, sink_logits], dim=-1)
+    combined = combined - combined.max(dim=-1, keepdim=True).values
+    probs = F.softmax(combined, dim=-1, dtype=combined.dtype)
+    attn_weights = probs[..., :-1].to(v_expanded.dtype)
+
+    attn_output = torch.matmul(attn_weights, v_expanded)
+    attn_output = attn_output.transpose(1, 2).contiguous().view(batch, seq_len, -1)
+
+    output = _fp8_linear(attn_output, o_proj[0], o_proj[1], o_proj_b)
+    return output, new_k, new_v

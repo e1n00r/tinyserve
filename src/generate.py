@@ -70,6 +70,12 @@ def generate(
           f"router={total_timings['router']:.2f}s, "
           f"experts={total_timings['experts']:.2f}s")
 
+    # Report cache stats if available
+    if hasattr(model, 'expert_pipeline') and model.expert_pipeline.cache is not None:
+        cache = model.expert_pipeline.cache
+        print(f"  Cache: {cache.hits} hits, {cache.misses} misses, "
+              f"hit rate={cache.hit_rate:.1%}")
+
     output_ids = input_ids[0].tolist() + generated
     return tokenizer.decode(output_ids, skip_special_tokens=True)
 
