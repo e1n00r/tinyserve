@@ -169,10 +169,7 @@ def attention_forward_fp8(
     past_kv: tuple[torch.Tensor, torch.Tensor] | None,
     sliding_window: int | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Attention forward with FP8 weight projections.
-
-    Each proj argument is (weight_fp8, scale) tuple.
-    """
+    """Attention forward with FP8 weight projections."""
     batch, seq_len, _ = hidden_states.shape
 
     q = _fp8_linear(hidden_states, q_proj[0], q_proj[1], q_proj_b)
@@ -195,35 +192,63 @@ def attention_forward_fp8(
         k = torch.cat([past_k.to(k.dtype), k], dim=2)
         v = torch.cat([past_v.to(v.dtype), v], dim=2)
 
-    k_expanded = repeat_kv(k, NUM_KV_GROUPS)
-    v_expanded = repeat_kv(v, NUM_KV_GROUPS)
+    kv_len = k.shape[2]
 
-    scaling = HEAD_DIM ** -0.5
-    attn_weights = torch.matmul(q, k_expanded.transpose(2, 3)) * scaling
+    # Decode path (seq_len=1): skip mask allocation, trim KV for sliding window
+    if seq_len == 1:
+        if sliding_window is not None and kv_len > sliding_window:
+            k = k[:, :, -sliding_window:, :]
+            v = v[:, :, -sliding_window:, :]
+            kv_len = sliding_window
 
-    kv_len = k_expanded.shape[2]
-    causal_mask = torch.triu(
-        torch.full((seq_len, kv_len), float("-inf"), device=hidden_states.device, dtype=hidden_states.dtype),
-        diagonal=kv_len - seq_len + 1,
-    )
+        # GQA expand (no copy needed — expand is a view)
+        k_expanded = k[:, :, None, :, :].expand(
+            batch, NUM_KV_HEADS, NUM_KV_GROUPS, kv_len, HEAD_DIM
+        ).reshape(batch, NUM_ATTENTION_HEADS, kv_len, HEAD_DIM)
+        v_expanded = v[:, :, None, :, :].expand(
+            batch, NUM_KV_HEADS, NUM_KV_GROUPS, kv_len, HEAD_DIM
+        ).reshape(batch, NUM_ATTENTION_HEADS, kv_len, HEAD_DIM)
 
-    if sliding_window is not None:
-        sw_mask = torch.tril(
+        scores = torch.matmul(q, k_expanded.transpose(2, 3)) * (HEAD_DIM ** -0.5)
+
+        # Sink: append per-head sink logit, softmax, strip sink probability
+        sink_col = sinks.reshape(1, -1, 1, 1).expand(batch, NUM_ATTENTION_HEADS, 1, 1)
+        combined = torch.cat([scores, sink_col], dim=-1)
+        combined = combined - combined.amax(dim=-1, keepdim=True)
+        probs = torch.softmax(combined, dim=-1)
+        attn_weights = probs[..., :-1].to(v_expanded.dtype)
+
+        attn_output = torch.matmul(attn_weights, v_expanded)
+    else:
+        # Prefill path: full mask computation
+        k_expanded = repeat_kv(k, NUM_KV_GROUPS)
+        v_expanded = repeat_kv(v, NUM_KV_GROUPS)
+
+        scaling = HEAD_DIM ** -0.5
+        attn_weights = torch.matmul(q, k_expanded.transpose(2, 3)) * scaling
+
+        causal_mask = torch.triu(
             torch.full((seq_len, kv_len), float("-inf"), device=hidden_states.device, dtype=hidden_states.dtype),
-            diagonal=-(sliding_window + 1) + (kv_len - seq_len),
+            diagonal=kv_len - seq_len + 1,
         )
-        causal_mask = causal_mask + sw_mask
 
-    attn_weights = attn_weights + causal_mask.unsqueeze(0).unsqueeze(0)
+        if sliding_window is not None:
+            sw_mask = torch.tril(
+                torch.full((seq_len, kv_len), float("-inf"), device=hidden_states.device, dtype=hidden_states.dtype),
+                diagonal=-(sliding_window + 1) + (kv_len - seq_len),
+            )
+            causal_mask = causal_mask + sw_mask
 
-    sink_logits = sinks.reshape(1, -1, 1, 1).expand(batch, -1, seq_len, 1)
-    combined = torch.cat([attn_weights, sink_logits], dim=-1)
-    combined = combined - combined.max(dim=-1, keepdim=True).values
-    probs = F.softmax(combined, dim=-1, dtype=combined.dtype)
-    attn_weights = probs[..., :-1].to(v_expanded.dtype)
+        attn_weights = attn_weights + causal_mask.unsqueeze(0).unsqueeze(0)
 
-    attn_output = torch.matmul(attn_weights, v_expanded)
+        sink_logits = sinks.reshape(1, -1, 1, 1).expand(batch, -1, seq_len, 1)
+        combined = torch.cat([attn_weights, sink_logits], dim=-1)
+        combined = combined - combined.max(dim=-1, keepdim=True).values
+        probs = F.softmax(combined, dim=-1, dtype=combined.dtype)
+        attn_weights = probs[..., :-1].to(v_expanded.dtype)
+
+        attn_output = torch.matmul(attn_weights, v_expanded)
+
     attn_output = attn_output.transpose(1, 2).contiguous().view(batch, seq_len, -1)
-
     output = _fp8_linear(attn_output, o_proj[0], o_proj[1], o_proj_b)
     return output, new_k, new_v

@@ -1,4 +1,4 @@
-"""Pinned CPU expert storage with async GPU transfer."""
+"""Expert storage with mmap + async GPU transfer."""
 
 from pathlib import Path
 
@@ -21,7 +21,6 @@ class ExpertBuffer:
     """Pre-allocated GPU buffer for a single expert's MXFP4 data."""
 
     def __init__(self, device: torch.device):
-        # Shapes for a single expert (no batch dim)
         self.gate_up_blocks = torch.empty(
             GATE_UP_BLOCKS_SHAPE[1:], dtype=torch.uint8, device=device
         )
@@ -42,13 +41,11 @@ class ExpertBuffer:
         )
 
 
-
 class ExpertStore:
-    """Holds all experts in pinned CPU memory, supports async copy to GPU buffers."""
+    """Holds all experts in mmap'd CPU memory, supports async copy to GPU buffers."""
 
     def __init__(self, weights_dir: str):
         self.weights_dir = Path(weights_dir)
-        # Per-layer tensors: [NUM_EXPERTS, ...]
         self.gate_up_blocks: list[torch.Tensor] = []
         self.gate_up_scales: list[torch.Tensor] = []
         self.gate_up_bias: list[torch.Tensor] = []
@@ -57,14 +54,8 @@ class ExpertStore:
         self.down_bias: list[torch.Tensor] = []
 
     def load(self):
-        """Load all expert weights via mmap (zero-copy from disk).
-
-        Uses safetensors mmap so tensors are backed by the file system.
-        Pages are faulted in on first access and can be evicted by the OS
-        under memory pressure — no OOM risk.
-        """
+        """Load all expert weights via mmap (zero-copy from disk)."""
         print(f"Loading experts from {self.weights_dir} (mmap)...")
-        # Keep file handles alive so mmap stays valid
         self._handles: list = []
         for layer_idx in range(NUM_LAYERS):
             path = self.weights_dir / f"experts_L{layer_idx:02d}.safetensors"
