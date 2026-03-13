@@ -115,14 +115,9 @@ class ExpertPipeline:
             self.compute_stream.synchronize()
 
     def _cache_insert(self, cache, layer_idx, eid, buf):
-        """Insert expert from buffer into LRU cache."""
+        """Insert expert from buffer into LRU cache (single GPU→GPU copy)."""
         slot = cache.allocate(layer_idx, eid)
-        cache.gate_up_blocks[slot].copy_(buf.gate_up_blocks)
-        cache.gate_up_scales[slot].copy_(buf.gate_up_scales)
-        cache.gate_up_bias[slot].copy_(buf.gate_up_bias)
-        cache.down_blocks[slot].copy_(buf.down_blocks)
-        cache.down_scales[slot].copy_(buf.down_scales)
-        cache.down_bias[slot].copy_(buf.down_bias)
+        cache.get_packed(slot).copy_(buf.packed)
 
     def _pipeline_misses(
         self,

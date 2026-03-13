@@ -9,36 +9,52 @@ from .config import (
     DOWN_BIAS_SHAPE,
     DOWN_BLOCKS_SHAPE,
     DOWN_SCALES_SHAPE,
+    EXPERT_BYTES,
     GATE_UP_BIAS_SHAPE,
     GATE_UP_BLOCKS_SHAPE,
     GATE_UP_SCALES_SHAPE,
     NUM_EXPERTS,
     NUM_LAYERS,
+    PACK_DN_BIAS_OFF,
+    PACK_DN_BLOCKS_OFF,
+    PACK_DN_SCALES_OFF,
+    PACK_GU_BIAS_OFF,
+    PACK_GU_BLOCKS_OFF,
+    PACK_GU_SCALES_OFF,
 )
+
+_gu_b = GATE_UP_BLOCKS_SHAPE[1] * GATE_UP_BLOCKS_SHAPE[2] * GATE_UP_BLOCKS_SHAPE[3]
+_gu_s = GATE_UP_SCALES_SHAPE[1] * GATE_UP_SCALES_SHAPE[2]
+_gu_bias = GATE_UP_BIAS_SHAPE[1] * 4
+_dn_b = DOWN_BLOCKS_SHAPE[1] * DOWN_BLOCKS_SHAPE[2] * DOWN_BLOCKS_SHAPE[3]
+_dn_s = DOWN_SCALES_SHAPE[1] * DOWN_SCALES_SHAPE[2]
+_dn_bias = DOWN_BIAS_SHAPE[1] * 4
 
 
 class ExpertBuffer:
-    """Pre-allocated GPU buffer for a single expert's MXFP4 data."""
+    """Pre-allocated GPU buffer for a single expert's MXFP4 data.
+
+    Uses a contiguous packed buffer with views for each tensor.
+    """
 
     def __init__(self, device: torch.device):
-        self.gate_up_blocks = torch.empty(
-            GATE_UP_BLOCKS_SHAPE[1:], dtype=torch.uint8, device=device
-        )
-        self.gate_up_scales = torch.empty(
-            GATE_UP_SCALES_SHAPE[1:], dtype=torch.uint8, device=device
-        )
-        self.gate_up_bias = torch.empty(
-            GATE_UP_BIAS_SHAPE[1:], dtype=torch.float32, device=device
-        )
-        self.down_blocks = torch.empty(
-            DOWN_BLOCKS_SHAPE[1:], dtype=torch.uint8, device=device
-        )
-        self.down_scales = torch.empty(
-            DOWN_SCALES_SHAPE[1:], dtype=torch.uint8, device=device
-        )
-        self.down_bias = torch.empty(
-            DOWN_BIAS_SHAPE[1:], dtype=torch.float32, device=device
-        )
+        self.packed = torch.empty(EXPERT_BYTES, dtype=torch.uint8, device=device)
+        self._create_views()
+
+    def _create_views(self):
+        p = self.packed
+        self.gate_up_blocks = p[PACK_GU_BLOCKS_OFF:PACK_GU_BLOCKS_OFF + _gu_b].view(
+            *GATE_UP_BLOCKS_SHAPE[1:])
+        self.gate_up_scales = p[PACK_GU_SCALES_OFF:PACK_GU_SCALES_OFF + _gu_s].view(
+            *GATE_UP_SCALES_SHAPE[1:])
+        self.gate_up_bias = p[PACK_GU_BIAS_OFF:PACK_GU_BIAS_OFF + _gu_bias].view(
+            torch.float32).view(*GATE_UP_BIAS_SHAPE[1:])
+        self.down_blocks = p[PACK_DN_BLOCKS_OFF:PACK_DN_BLOCKS_OFF + _dn_b].view(
+            *DOWN_BLOCKS_SHAPE[1:])
+        self.down_scales = p[PACK_DN_SCALES_OFF:PACK_DN_SCALES_OFF + _dn_s].view(
+            *DOWN_SCALES_SHAPE[1:])
+        self.down_bias = p[PACK_DN_BIAS_OFF:PACK_DN_BIAS_OFF + _dn_bias].view(
+            torch.float32).view(*DOWN_BIAS_SHAPE[1:])
 
 
 class ExpertStore:

@@ -12,55 +12,61 @@ from .config import (
     GATE_UP_BIAS_SHAPE,
     GATE_UP_BLOCKS_SHAPE,
     GATE_UP_SCALES_SHAPE,
+    PACK_DN_BIAS_OFF,
+    PACK_DN_BLOCKS_OFF,
+    PACK_DN_SCALES_OFF,
+    PACK_GU_BIAS_OFF,
+    PACK_GU_BLOCKS_OFF,
+    PACK_GU_SCALES_OFF,
 )
+
+_gu_b = GATE_UP_BLOCKS_SHAPE[1] * GATE_UP_BLOCKS_SHAPE[2] * GATE_UP_BLOCKS_SHAPE[3]
+_gu_s = GATE_UP_SCALES_SHAPE[1] * GATE_UP_SCALES_SHAPE[2]
+_gu_bias = GATE_UP_BIAS_SHAPE[1] * 4
+_dn_b = DOWN_BLOCKS_SHAPE[1] * DOWN_BLOCKS_SHAPE[2] * DOWN_BLOCKS_SHAPE[3]
+_dn_s = DOWN_SCALES_SHAPE[1] * DOWN_SCALES_SHAPE[2]
+_dn_bias = DOWN_BIAS_SHAPE[1] * 4
 
 
 class ExpertLRUCache:
     """LRU cache storing frequently-used experts in GPU VRAM.
 
-    Pre-allocates a fixed number of slots on GPU. Each slot holds one
-    expert's MXFP4-packed data (blocks, scales, biases). Cache hits
-    skip PCIe transfer entirely.
+    Uses contiguous packed storage per slot. Cache insert/read is a
+    single GPU→GPU copy of the packed buffer.
     """
 
     def __init__(self, capacity: int, device: torch.device):
-        """
-        Args:
-            capacity: max number of experts to cache
-            device: GPU device
-        """
         self.capacity = capacity
         self.device = device
 
-        # LRU tracking: key=(layer_idx, expert_idx) -> slot_index
-        # OrderedDict maintains insertion/access order for LRU
         self._lru: OrderedDict[tuple[int, int], int] = OrderedDict()
-
-        # Free slot stack
         self._free_slots: list[int] = list(range(capacity - 1, -1, -1))
 
-        # Pre-allocated GPU storage: [capacity, ...] for each tensor type
-        # Shapes per expert (without the expert dim)
-        gu_b = GATE_UP_BLOCKS_SHAPE[1:]  # (5760, 90, 16)
-        gu_s = GATE_UP_SCALES_SHAPE[1:]  # (5760, 90)
-        dn_b = DOWN_BLOCKS_SHAPE[1:]     # (2880, 90, 16)
-        dn_s = DOWN_SCALES_SHAPE[1:]     # (2880, 90)
+        # Contiguous packed storage: [capacity, EXPERT_BYTES] uint8
+        self._packed = torch.empty((capacity, EXPERT_BYTES), dtype=torch.uint8, device=device)
 
-        self.gate_up_blocks = torch.empty((capacity, *gu_b), dtype=torch.uint8, device=device)
-        self.gate_up_scales = torch.empty((capacity, *gu_s), dtype=torch.uint8, device=device)
-        self.gate_up_bias = torch.empty((capacity, GATE_UP_BIAS_SHAPE[1]), dtype=torch.float32, device=device)
-        self.down_blocks = torch.empty((capacity, *dn_b), dtype=torch.uint8, device=device)
-        self.down_scales = torch.empty((capacity, *dn_s), dtype=torch.uint8, device=device)
-        self.down_bias = torch.empty((capacity, DOWN_BIAS_SHAPE[1]), dtype=torch.float32, device=device)
+        # Create views for each slot's tensors
+        self.gate_up_blocks = self._packed[:, PACK_GU_BLOCKS_OFF:PACK_GU_BLOCKS_OFF + _gu_b].view(
+            capacity, *GATE_UP_BLOCKS_SHAPE[1:])
+        self.gate_up_scales = self._packed[:, PACK_GU_SCALES_OFF:PACK_GU_SCALES_OFF + _gu_s].view(
+            capacity, *GATE_UP_SCALES_SHAPE[1:])
+        self.gate_up_bias = self._packed[:, PACK_GU_BIAS_OFF:PACK_GU_BIAS_OFF + _gu_bias].reshape(
+            capacity, _gu_bias).view(torch.float32).view(capacity, *GATE_UP_BIAS_SHAPE[1:])
+        self.down_blocks = self._packed[:, PACK_DN_BLOCKS_OFF:PACK_DN_BLOCKS_OFF + _dn_b].view(
+            capacity, *DOWN_BLOCKS_SHAPE[1:])
+        self.down_scales = self._packed[:, PACK_DN_SCALES_OFF:PACK_DN_SCALES_OFF + _dn_s].view(
+            capacity, *DOWN_SCALES_SHAPE[1:])
+        self.down_bias = self._packed[:, PACK_DN_BIAS_OFF:PACK_DN_BIAS_OFF + _dn_bias].reshape(
+            capacity, _dn_bias).view(torch.float32).view(capacity, *DOWN_BIAS_SHAPE[1:])
 
         self.hits = 0
         self.misses = 0
 
-    def lookup(self, layer_idx: int, expert_idx: int) -> int | None:
-        """Check if expert is cached. Returns slot index or None.
+    def get_packed(self, slot: int) -> torch.Tensor:
+        """Get the packed buffer for a slot (for single-copy operations)."""
+        return self._packed[slot]
 
-        Moves the entry to most-recently-used on hit.
-        """
+    def lookup(self, layer_idx: int, expert_idx: int) -> int | None:
         key = (layer_idx, expert_idx)
         if key in self._lru:
             self._lru.move_to_end(key)
@@ -70,22 +76,14 @@ class ExpertLRUCache:
         return None
 
     def contains(self, layer_idx: int, expert_idx: int) -> bool:
-        """Check if expert is cached without modifying LRU order or stats."""
         return (layer_idx, expert_idx) in self._lru
 
     def allocate(self, layer_idx: int, expert_idx: int) -> int:
-        """Allocate a cache slot for a new expert, evicting LRU if full.
-
-        Returns the slot index. Caller must copy data into the slot.
-        """
         key = (layer_idx, expert_idx)
-
         if self._free_slots:
             slot = self._free_slots.pop()
         else:
-            # Evict least recently used
             evicted_key, slot = self._lru.popitem(last=False)
-
         self._lru[key] = slot
         return slot
 
@@ -100,5 +98,4 @@ class ExpertLRUCache:
 
     @staticmethod
     def estimate_capacity(available_bytes: int) -> int:
-        """How many experts fit in the given VRAM budget."""
         return available_bytes // EXPERT_BYTES

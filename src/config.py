@@ -47,6 +47,14 @@ _dn_s = DOWN_SCALES_SHAPE[1] * DOWN_SCALES_SHAPE[2]
 _dn_bias = DOWN_BIAS_SHAPE[1] * 4  # float32
 EXPERT_BYTES = _gu_b + _gu_s + _gu_bias + _dn_b + _dn_s + _dn_bias  # 13,253,760
 
+# Byte offsets for packed expert buffer (all uint8 view)
+PACK_GU_BLOCKS_OFF = 0
+PACK_GU_SCALES_OFF = _gu_b
+PACK_GU_BIAS_OFF = _gu_b + _gu_s
+PACK_DN_BLOCKS_OFF = _gu_b + _gu_s + _gu_bias
+PACK_DN_SCALES_OFF = _gu_b + _gu_s + _gu_bias + _dn_b
+PACK_DN_BIAS_OFF = _gu_b + _gu_s + _gu_bias + _dn_b + _dn_s
+
 FP4_LUT = torch.tensor(
     [+0.0, +0.5, +1.0, +1.5, +2.0, +3.0, +4.0, +6.0,
      -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
