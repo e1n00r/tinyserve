@@ -1,76 +1,56 @@
-"""MXFP4 dequantization for GPT-OSS expert weights.
-
-Ported from transformers.integrations.mxfp4.convert_moe_packed_tensors.
-"""
-
-import math
+"""MXFP4 dequantization for GPT-OSS expert weights."""
 
 import torch
 
 from .config import FP4_LUT
 
+_lut_cache: dict[tuple[torch.dtype, torch.device], torch.Tensor] = {}
 
-def dequant_mxfp4(
+
+def _get_lut(dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    key = (dtype, device)
+    if key not in _lut_cache:
+        _lut_cache[key] = FP4_LUT.to(dtype=dtype, device=device)
+    return _lut_cache[key]
+
+
+def dequant_mxfp4_no_transpose(
     blocks: torch.Tensor,
     scales: torch.Tensor,
     dtype: torch.dtype = torch.bfloat16,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Dequantize MXFP4 packed tensors to dense float.
+    """Dequantize MXFP4 to [out_features, in_features] for F.linear.
 
-    Args:
-        blocks: uint8 tensor, shape [..., G, 16] where each byte holds 2 FP4 values
-        scales: uint8 tensor, shape [..., G] with E8M0 block scales
-        dtype: output dtype
-
-    Returns:
-        Dequantized tensor, shape [..., G*32] with the last two dims merged and
-        transposed as [in_features, out_features] (ready for matmul).
+    If `out` is provided, writes into it (must be [out_features, G*B*2] in dtype).
     """
-    device = blocks.device
-    lut = FP4_LUT.to(dtype=dtype, device=device)
-    scales_int = scales.to(torch.int32) - 127
+    lut = _get_lut(dtype, blocks.device)
 
-    *prefix_shape, G, B = blocks.shape
-    rows_total = math.prod(prefix_shape) * G
+    out_features, G, B = blocks.shape
+    rows = out_features * G
 
-    blocks_flat = blocks.reshape(rows_total, B)
-    scales_flat = scales_int.reshape(rows_total, 1)
+    bf = blocks.reshape(rows, B)
+    si = (scales.to(torch.int32) - 127).reshape(rows, 1)
 
-    out = torch.empty(rows_total, B * 2, dtype=dtype, device=device)
+    if out is None:
+        out = torch.empty(rows, B * 2, dtype=dtype, device=blocks.device)
+    else:
+        out = out.view(rows, B * 2)
 
-    # Process all rows — single expert fits in VRAM easily
-    idx_lo = (blocks_flat & 0x0F).to(torch.int32)
-    idx_hi = (blocks_flat >> 4).to(torch.int32)
+    out[:, 0::2] = lut[(bf & 0x0F).to(torch.int32)]
+    out[:, 1::2] = lut[(bf >> 4).to(torch.int32)]
+    torch.ldexp(out, si, out=out)
 
-    out[:, 0::2] = lut[idx_lo]
-    out[:, 1::2] = lut[idx_hi]
-    torch.ldexp(out, scales_flat, out=out)
-    del idx_lo, idx_hi
-
-    out = out.reshape(*prefix_shape, G, B * 2).view(*prefix_shape, G * B * 2)
-    return out.transpose(-2, -1).contiguous()
+    return out.view(out_features, G * B * 2)
 
 
-def dequant_single_expert(
-    gate_up_blocks: torch.Tensor,
-    gate_up_scales: torch.Tensor,
-    down_blocks: torch.Tensor,
-    down_scales: torch.Tensor,
-    dtype: torch.dtype = torch.bfloat16,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Dequantize a single expert's weights.
+# Backward-compat for tests
+def dequant_mxfp4(blocks, scales, dtype=torch.bfloat16):
+    w = dequant_mxfp4_no_transpose(blocks, scales, dtype)
+    return w.T.contiguous()
 
-    Args:
-        gate_up_blocks: [2*intermediate, hidden//32, 16] uint8
-        gate_up_scales: [2*intermediate, hidden//32] uint8
-        down_blocks: [hidden, intermediate//32, 16] uint8
-        down_scales: [hidden, intermediate//32] uint8
 
-    Returns:
-        (gate_up_weight, down_weight) both in dtype, shapes:
-        gate_up: [hidden_size, 2*intermediate_size]
-        down:    [intermediate_size, hidden_size]
-    """
+def dequant_single_expert(gate_up_blocks, gate_up_scales, down_blocks, down_scales, dtype=torch.bfloat16):
     gate_up_w = dequant_mxfp4(gate_up_blocks, gate_up_scales, dtype)
     down_w = dequant_mxfp4(down_blocks, down_scales, dtype)
     return gate_up_w, down_w
