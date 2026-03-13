@@ -80,7 +80,11 @@ class ExpertPipeline:
             else:
                 misses.append(i)
 
-        # Compute cache hits on default stream
+        # Prefetch miss pages from SSD (non-blocking kernel readahead)
+        for m in misses:
+            self.store.prefetch(layer_idx, expert_ids[m])
+
+        # Compute cache hits on default stream (while SSD reads happen in background)
         for i, slot in hits:
             out = expert_forward(
                 h,
