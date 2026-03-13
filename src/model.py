@@ -8,6 +8,7 @@ from safetensors.torch import load_file
 
 from .attention import attention_forward, rms_norm
 from .config import (
+    EXPERT_BYTES,
     HIDDEN_SIZE,
     LAYER_TYPES,
     NUM_EXPERTS_PER_TOK,
@@ -17,6 +18,7 @@ from .config import (
 from .expert_store import ExpertBuffer, ExpertStore
 from .experts import expert_forward
 from .kv_cache import HybridKVCache
+from .lru_cache import ExpertLRUCache
 from .pipeline import ExpertPipeline
 from .rope import build_rope_cache
 
@@ -29,7 +31,21 @@ class OffloadedGptOss:
     KV cache: sliding-window layers on GPU, full-attention layers on CPU.
     """
 
-    def __init__(self, weights_dir: str, device: str = "cuda", pipeline: bool = True):
+    def __init__(
+        self,
+        weights_dir: str,
+        device: str = "cuda",
+        pipeline: bool = True,
+        cache_capacity: int | None = None,
+    ):
+        """
+        Args:
+            weights_dir: directory with non_expert.safetensors + experts_L*.safetensors
+            device: GPU device
+            pipeline: use double-buffered pipeline (True) or blocking (False)
+            cache_capacity: number of experts to cache in VRAM. None = auto-size
+                from free VRAM. 0 = disable cache.
+        """
         self.device = torch.device(device)
         self.dtype = torch.bfloat16
         self.use_pipeline = pipeline
@@ -43,16 +59,27 @@ class OffloadedGptOss:
         self.expert_store = ExpertStore(weights_dir)
         self.expert_store.load()
 
+        # Auto-size cache from remaining VRAM
+        if cache_capacity is None and pipeline:
+            reserved = 256 * 1024 * 1024  # 256 MB headroom for KV, buffers, activations
+            free_mem = torch.cuda.mem_get_info(self.device)[0] - reserved
+            cache_capacity = ExpertLRUCache.estimate_capacity(max(0, free_mem))
+            print(f"  Auto-sized expert LRU cache: {cache_capacity} experts "
+                  f"({cache_capacity * EXPERT_BYTES / 1024**3:.2f} GB)")
+
         if pipeline:
-            self.expert_pipeline = ExpertPipeline(self.expert_store, self.device)
+            self.expert_pipeline = ExpertPipeline(
+                self.expert_store, self.device,
+                cache_capacity=cache_capacity or 0,
+            )
         else:
             self.expert_buf = ExpertBuffer(self.device)
 
         self.cos_cache, self.sin_cache = build_rope_cache(self.device, self.dtype)
         self.kv_cache = HybridKVCache(self.device)
 
-        mode = "pipelined" if pipeline else "blocking"
-        print(f"Model ready ({mode} expert loading).")
+        mode = "pipelined" + (f"+cache({cache_capacity})" if cache_capacity else "") if pipeline else "blocking"
+        print(f"Model ready ({mode}).")
 
     def _w(self, key: str) -> torch.Tensor:
         return self.weights[key]
