@@ -15,11 +15,11 @@ from .model_registry import profile_from_config
 from .offloaded_model import OffloadedModel
 
 _ROUTING_MAP = {
-    "mixtral": ("softmax_then_topk", True),
-    "qwen3_moe": ("softmax_then_topk", True),
-    "qwen2_moe": ("softmax_then_topk", True),
-    "deepseek_v3": ("router_native", False),
-    "gpt_oss": ("topk_then_softmax", False),
+    "mixtral": ("softmax_then_topk", True, "gate"),
+    "qwen3_moe": ("softmax_then_topk", True, "gate"),
+    "qwen2_moe": ("softmax_then_topk", True, "gate"),
+    "deepseek_v3": ("router_native", False, "gate"),
+    "gpt_oss": ("router_native", True, "router"),
 }
 
 
@@ -47,8 +47,8 @@ def offload_model(
     profile = profile_from_config(config)
     model_type = config.model_type
 
-    softmax_order, returns_logits = _ROUTING_MAP.get(
-        model_type, ("softmax_then_topk", True)
+    softmax_order, returns_logits, router_attr = _ROUTING_MAP.get(
+        model_type, ("softmax_then_topk", True, "gate")
     )
 
     inner_model = model.model if hasattr(model, "model") else model
@@ -57,7 +57,7 @@ def offload_model(
         inner_model,
         moe_block_attr=profile.moe_block_attr,
         expert_list_attr=profile.expert_list_attr,
-        router_attr="gate",
+        router_attr=router_attr,
         top_k=profile.num_experts_per_tok,
         device=device,
         cache_capacity=cache_capacity,

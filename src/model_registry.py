@@ -40,7 +40,7 @@ def profile_from_config(config: PretrainedConfig) -> ModelProfile:
                 weight_names=["gate_up_proj", "down_proj"],
                 bias_names=["gate_up_proj_bias", "down_proj_bias"],
             ),
-            num_experts=config.num_experts,
+            num_experts=getattr(config, "num_local_experts", getattr(config, "num_experts", 128)),
             num_experts_per_tok=config.num_experts_per_tok,
             num_layers=config.num_hidden_layers,
         )

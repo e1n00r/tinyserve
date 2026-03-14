@@ -138,3 +138,41 @@ def test_deepseek_v3():
         softmax_order="router_native", first_moe_layer=2,
         atol=0.01,
     )
+
+
+@requires_cuda
+def test_gpt_oss():
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    torch.manual_seed(42)
+    config = AutoConfig.from_pretrained("openai/gpt-oss-20b")
+    config.num_hidden_layers = 2
+    config.num_local_experts = 4
+    config.hidden_size = 64
+    config.intermediate_size = 64
+    config.num_attention_heads = 4
+    config.num_key_value_heads = 2
+    config.vocab_size = 256
+    config.max_position_embeddings = 64
+    config.head_dim = 16
+    config.layer_types = ["sliding_attention", "full_attention"]
+    config.pad_token_id = None
+
+    model = AutoModelForCausalLM.from_config(config).to(torch.bfloat16).eval()
+    device = torch.device("cuda")
+
+    ref = AutoModelForCausalLM.from_config(config).to(torch.bfloat16).eval()
+    ref.load_state_dict(model.state_dict())
+    ref = ref.to(device)
+
+    input_ids = torch.tensor([[1, 42, 100, 7]], device=device)
+    with torch.no_grad():
+        ref_tok = ref(input_ids).logits[:, -1, :].argmax().item()
+
+    from src.offload import offload_model
+    offloaded = offload_model(model, device=device, cache_capacity=16)
+
+    with torch.no_grad():
+        off_tok = offloaded(input_ids).logits[:, -1, :].argmax().item()
+
+    assert off_tok == ref_tok

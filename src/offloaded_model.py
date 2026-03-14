@@ -59,25 +59,18 @@ class OffloadedModel(nn.Module):
             if li >= first_moe_layer and hasattr(getattr(layer, moe_block_attr, None), expert_list_attr)
         ]
 
-        expert_weights = {}
-        for store_idx, (li, layer) in enumerate(moe_layers):
-            moe_block = getattr(layer, moe_block_attr)
-            expert_list = getattr(moe_block, expert_list_attr)
-            for expert_idx, expert in enumerate(expert_list):
-                expert_tensors = {}
-                for name, param in expert.named_parameters():
-                    expert_tensors[name] = param.data.detach().cpu().clone()
-                expert_weights[(store_idx, expert_idx)] = expert_tensors
+        expert_weights, num_experts = _extract_expert_weights(
+            moe_layers, moe_block_attr, expert_list_attr, top_k,
+        )
 
         num_moe_layers = len(moe_layers)
-        num_experts = len(getattr(getattr(moe_layers[0][1], moe_block_attr), expert_list_attr))
         store = GenericExpertStore.from_dict(expert_weights, num_moe_layers, num_experts)
 
         pipelines = []
         for store_idx, (li, layer) in enumerate(moe_layers):
             moe_block = getattr(layer, moe_block_attr)
-            expert_list = getattr(moe_block, expert_list_attr)
-            template = copy.deepcopy(expert_list[0]).to(device).to(torch.bfloat16)
+            expert_container = getattr(moe_block, expert_list_attr)
+            template = _make_template(expert_container, device)
             pipeline = GenericExpertPipeline(store, template, device, cache_capacity=cache_capacity)
             pipelines.append(pipeline)
 
@@ -87,12 +80,89 @@ class OffloadedModel(nn.Module):
                 softmax_order=softmax_order,
             )
 
-            for expert in expert_list:
-                for param in expert.parameters():
-                    param.data = torch.empty(0)
+            for param in expert_container.parameters():
+                param.data = torch.empty(0, device="cpu")
 
         model = model.to(device).to(torch.bfloat16)
         return cls(model, pipelines)
+
+
+def _extract_expert_weights(moe_layers, moe_block_attr, expert_list_attr, top_k):
+    """Extract expert weights from either nn.ModuleList or fused nn.Parameter."""
+    expert_weights = {}
+    first_moe = getattr(moe_layers[0][1], moe_block_attr)
+    expert_container = getattr(first_moe, expert_list_attr)
+
+    if isinstance(expert_container, nn.ModuleList):
+        num_experts = len(expert_container)
+        for store_idx, (_, layer) in enumerate(moe_layers):
+            moe_block = getattr(layer, moe_block_attr)
+            expert_list = getattr(moe_block, expert_list_attr)
+            for expert_idx, expert in enumerate(expert_list):
+                expert_tensors = {}
+                for name, param in expert.named_parameters():
+                    expert_tensors[name] = param.data.detach().cpu().clone()
+                expert_weights[(store_idx, expert_idx)] = expert_tensors
+    else:
+        num_experts = next(iter(expert_container.parameters())).shape[0]
+        for store_idx, (_, layer) in enumerate(moe_layers):
+            moe_block = getattr(layer, moe_block_attr)
+            expert_container = getattr(moe_block, expert_list_attr)
+            for expert_idx in range(num_experts):
+                expert_tensors = {}
+                for name, param in expert_container.named_parameters():
+                    expert_tensors[name] = param.data[expert_idx].detach().cpu().clone()
+                expert_weights[(store_idx, expert_idx)] = expert_tensors
+
+    return expert_weights, num_experts
+
+
+def _make_template(expert_container, device):
+    """Create a template expert module for weight swapping."""
+    if isinstance(expert_container, nn.ModuleList):
+        return copy.deepcopy(expert_container[0]).to(device).to(torch.bfloat16)
+    else:
+        return _FusedExpertTemplate(expert_container).to(device).to(torch.bfloat16)
+
+
+class _FusedExpertTemplate(nn.Module):
+    """Template for fused-parameter experts (e.g., GPT-OSS GptOssExperts).
+
+    Creates nn.Parameter placeholders matching the per-expert slice shapes.
+    Forward replicates the original expert's computation.
+    """
+
+    def __init__(self, fused_container: nn.Module):
+        super().__init__()
+        self._param_names = []
+        for name, param in fused_container.named_parameters():
+            per_expert_shape = param.shape[1:]
+            self.register_parameter(name, nn.Parameter(torch.zeros(per_expert_shape, dtype=param.dtype)))
+            self._param_names.append(name)
+        self._forward_fn = getattr(fused_container, '_expert_forward', None)
+        self._container_type = type(fused_container)
+
+    def forward(self, hidden_states):
+        params = {name: getattr(self, name) for name in self._param_names}
+        return self._default_forward(hidden_states, params)
+
+    def _default_forward(self, hidden_states, params):
+        """Generic SwiGLU forward for GPT-OSS-style fused experts.
+
+        GPT-OSS stores weights as [in_features, out_features] (transposed from nn.Linear).
+        """
+        w_gu = params["gate_up_proj"]
+        if w_gu.shape[0] == hidden_states.shape[-1]:
+            w_gu = w_gu.t()
+        gate_up = nn.functional.linear(hidden_states, w_gu, params.get("gate_up_proj_bias"))
+        gate = gate_up[..., ::2].clamp(max=7.0)
+        up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
+        glu = gate * torch.sigmoid(gate * 1.702)
+        gated = (up + 1) * glu
+        w_dn = params["down_proj"]
+        if w_dn.shape[0] == gated.shape[-1]:
+            w_dn = w_dn.t()
+        return nn.functional.linear(gated, w_dn, params.get("down_proj_bias"))
 
 
 def _extract_routing_fn(moe_block, router_attr, top_k, softmax_order):
@@ -102,7 +172,15 @@ def _extract_routing_fn(moe_block, router_attr, top_k, softmax_order):
 
     if softmax_order == "router_native":
         def route(hidden_states):
-            top_idx, routing_weights = router(hidden_states)
+            first, second = router(hidden_states)
+            if second.dtype in (torch.int32, torch.int64):
+                routing_weights_full, top_idx = first, second
+                if routing_weights_full.shape[-1] > top_k:
+                    routing_weights = routing_weights_full.gather(-1, top_idx)
+                else:
+                    routing_weights = routing_weights_full
+            else:
+                top_idx, routing_weights = first, second
             route.last_logits = None
             return top_idx, routing_weights.to(hidden_states.dtype)
     elif softmax_order == "softmax_then_topk":
