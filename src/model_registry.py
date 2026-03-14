@@ -59,7 +59,7 @@ def profile_from_config(config: PretrainedConfig) -> ModelProfile:
 
     if model_type == "mixtral":
         return ModelProfile(
-            moe_block_attr="block_sparse_moe",
+            moe_block_attr="mlp",
             expert_list_attr="experts",
             expert_layout=ExpertLayout(
                 weight_names=["w1", "w2", "w3"],
@@ -81,6 +81,19 @@ def profile_from_config(config: PretrainedConfig) -> ModelProfile:
             num_layers=config.num_hidden_layers,
             first_moe_layer=config.first_k_dense_replace,
             shared_expert_attr="shared_experts",
+        )
+
+    if model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
+        return ModelProfile(
+            moe_block_attr="mlp",
+            expert_list_attr="experts",
+            expert_layout=ExpertLayout(
+                weight_names=["gate_up_proj", "down_proj"],
+            ),
+            num_experts=config.num_experts,
+            num_experts_per_tok=config.num_experts_per_tok,
+            num_layers=config.num_hidden_layers,
+            shared_expert_attr="shared_expert",
         )
 
     if model_type == "olmoe":

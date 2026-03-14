@@ -15,12 +15,14 @@ from .model_registry import profile_from_config
 from .offloaded_model import OffloadedModel
 
 _ROUTING_MAP = {
-    "mixtral": ("softmax_then_topk", True, "gate"),
-    "qwen3_moe": ("softmax_then_topk", True, "gate"),
-    "qwen2_moe": ("softmax_then_topk", True, "gate"),
+    "mixtral": ("router_native", False, "gate"),
+    "qwen3_moe": ("router_native", False, "gate"),
+    "qwen2_moe": ("router_native", False, "gate"),
     "deepseek_v3": ("router_native", False, "gate"),
     "gpt_oss": ("router_native", True, "router"),
     "olmoe": ("softmax_then_topk", True, "gate"),
+    "qwen3_5_moe": ("router_native", False, "gate"),
+    "qwen3_5_moe_text": ("router_native", False, "gate"),
 }
 
 
@@ -45,8 +47,9 @@ def offload_model(
     """
     device = torch.device(device)
     config = model.config
-    profile = profile_from_config(config)
-    model_type = config.model_type
+    effective_config = getattr(config, "text_config", config)
+    profile = profile_from_config(effective_config)
+    model_type = effective_config.model_type
 
     softmax_order, returns_logits, router_attr = _ROUTING_MAP.get(
         model_type, ("softmax_then_topk", True, "gate")

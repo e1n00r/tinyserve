@@ -126,10 +126,10 @@ def _make_template(expert_container, device):
 
 
 class _FusedExpertTemplate(nn.Module):
-    """Template for fused-parameter experts (e.g., GPT-OSS GptOssExperts).
+    """Template for fused-parameter experts (GPT-OSS, Qwen3.5).
 
     Creates nn.Parameter placeholders matching the per-expert slice shapes.
-    Forward replicates the original expert's computation.
+    Detects activation type and weight layout from the original container.
     """
 
     def __init__(self, fused_container: nn.Module):
@@ -139,26 +139,26 @@ class _FusedExpertTemplate(nn.Module):
             per_expert_shape = param.shape[1:]
             self.register_parameter(name, nn.Parameter(torch.zeros(per_expert_shape, dtype=param.dtype)))
             self._param_names.append(name)
-        self._forward_fn = getattr(fused_container, '_expert_forward', None)
-        self._container_type = type(fused_container)
+
+        self._act_fn = getattr(fused_container, "act_fn", None)
+        self._has_bias = "gate_up_proj_bias" in self._param_names
 
     def forward(self, hidden_states):
         params = {name: getattr(self, name) for name in self._param_names}
-        return self._default_forward(hidden_states, params)
 
-    def _default_forward(self, hidden_states, params):
-        """Generic SwiGLU forward for GPT-OSS-style fused experts.
-
-        GPT-OSS stores weights as [in_features, out_features] (transposed from nn.Linear).
-        """
         w_gu = params["gate_up_proj"]
         if w_gu.shape[0] == hidden_states.shape[-1]:
             w_gu = w_gu.t()
         gate_up = nn.functional.linear(hidden_states, w_gu, params.get("gate_up_proj_bias"))
-        gate = gate_up[..., ::2].clamp(max=7.0)
-        up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
-        glu = gate * torch.sigmoid(gate * 1.702)
-        gated = (up + 1) * glu
+
+        if self._act_fn is not None:
+            gate, up = gate_up.chunk(2, dim=-1)
+            gated = self._act_fn(gate) * up
+        else:
+            gate = gate_up[..., ::2].clamp(max=7.0)
+            up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
+            gated = (up + 1) * gate * torch.sigmoid(gate * 1.702)
+
         w_dn = params["down_proj"]
         if w_dn.shape[0] == gated.shape[-1]:
             w_dn = w_dn.t()
@@ -172,7 +172,21 @@ def _extract_routing_fn(moe_block, router_attr, top_k, softmax_order):
 
     if softmax_order == "router_native":
         def route(hidden_states):
-            first, second = router(hidden_states)
+            result = router(hidden_states)
+            route.last_logits = None
+
+            if isinstance(result, torch.Tensor):
+                router_logits = result
+                routing_weights = torch.sigmoid(router_logits)
+                routing_weights, top_idx = torch.topk(routing_weights, top_k, dim=-1)
+                return top_idx, routing_weights.to(hidden_states.dtype)
+
+            if len(result) == 3:
+                router_logits, routing_weights, top_idx = result
+                route.last_logits = router_logits
+                return top_idx, routing_weights.to(hidden_states.dtype)
+
+            first, second = result
             if second.dtype in (torch.int32, torch.int64):
                 routing_weights_full, top_idx = first, second
                 if routing_weights_full.shape[-1] > top_k:
@@ -181,7 +195,6 @@ def _extract_routing_fn(moe_block, router_attr, top_k, softmax_order):
                     routing_weights = routing_weights_full
             else:
                 top_idx, routing_weights = first, second
-            route.last_logits = None
             return top_idx, routing_weights.to(hidden_states.dtype)
     elif softmax_order == "softmax_then_topk":
         def route(hidden_states):
@@ -211,7 +224,7 @@ def _install_offloaded_forward(
 ):
     route = _extract_routing_fn(moe_block, router_attr, top_k, softmax_order)
 
-    shared_expert = getattr(moe_block, "shared_experts", None)
+    shared_expert = getattr(moe_block, "shared_experts", None) or getattr(moe_block, "shared_expert", None)
 
     def offloaded_forward(hidden_states, **_kwargs):
         if hidden_states.dim() == 3:
