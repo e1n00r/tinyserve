@@ -1,50 +1,77 @@
-# gpt-oss-offload
+# moe-offload
 
-Run **GPT-OSS-120B** (117B params, 5.1B active MoE) on a single 8GB GPU.
+Run large MoE models on a single consumer GPU by offloading expert weights to CPU RAM.
 
-**14 tok/s** steady-state decode on an RTX PRO 2000 Blackwell laptop.
+**Supports Mixtral, Qwen3-MoE, DeepSeek-V3, GPT-OSS** — any HuggingFace MoE model.
+
+```python
+from transformers import AutoModelForCausalLM
+from src import offload_model
+
+model = AutoModelForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1", torch_dtype=torch.bfloat16)
+model = offload_model(model, device="cuda", cache_capacity=100)
+output = model.generate(input_ids, max_new_tokens=200)
+```
 
 ## How it works
 
-Expert weights (57 GB MXFP4) live in CPU RAM as memory-mapped files. A double-buffered PCIe pipeline streams cache-miss experts to GPU on demand. An LRU cache in VRAM (373 slots, 4.6 GB) keeps hot experts resident — after ~160 tokens the cache hits 99%+ and decode is GPU-compute bound.
+Expert weights live in CPU RAM. A double-buffered PCIe pipeline streams cache-miss experts to GPU on demand. An LRU cache in VRAM keeps hot experts resident — after the cache warms, decode becomes GPU-compute bound.
 
-Key optimizations:
-- **FP4 Tensor Core matmul** via Triton `tl.dot_scaled` on Blackwell (SM 12.0) — 5x over software dequant
-- **FP8 attention** (`torch._scaled_mm`) + **INT8 embeddings** — frees 2 GB VRAM for more cache
-- **GPU-resident KV cache** — pre-allocated, zero CPU transfers
-- **Contiguous packed binary** — one 12.6 MB DMA per expert instead of 6 scattered reads
+- **Double-buffered PCIe pipeline** — overlaps expert transfer with compute
+- **LRU expert cache** — frequently-used experts stay in VRAM
+- **Auto-detection** — identifies model family from HF config, applies correct routing
+- **Shared expert support** — DeepSeek-V3's shared experts stay on GPU permanently
+- **FP4 Tensor Core matmul** on Blackwell via Triton `tl.dot_scaled` (GPT-OSS MXFP4)
 
-## Performance
+## Supported models
 
-Measured on RTX PRO 2000 Blackwell (8 GB VRAM), 64 GB DDR5, PCIe 5.0:
-
-| Tokens generated | tok/s | Cache hit rate | Character |
+| Model | Experts | Top-K | Tested |
 |---|---|---|---|
-| 0–80 | 1.9–2.5 | 48–56% | Cold — filling LRU cache |
-| 80–160 | 2.6–5.1 | 53–78% | Warming — working set stabilizing |
-| 160–400 | 12–14 | 98–100% | Hot — GPU-compute bound |
+| **Mixtral 8x7B / 8x22B** | 8 | 2 | Exact logit match |
+| **Qwen3-MoE / Qwen3.5-MoE** | 128 | 8 | Exact logit match |
+| **DeepSeek-V3 (685B)** | 256 + shared | 8 | Token-level match |
+| **GPT-OSS-120B** | 128 | 4 | 14 tok/s (FP4 TC) |
 
-Older GPUs (Ampere, Ada) fall back to software MXFP4 dequant — expect ~3–5 tok/s steady-state.
+Any HuggingFace MoE model with `nn.ModuleList` experts should work via `offload_model()`.
+
+## Performance (GPT-OSS-120B on RTX PRO 2000 Blackwell 8GB)
+
+| Tokens generated | tok/s | Cache hit rate |
+|---|---|---|
+| 0–80 | 1.9–2.5 | 48–56% |
+| 80–160 | 2.6–5.1 | 53–78% |
+| 160–400 | 12–14 | 98–100% |
 
 ## Requirements
 
-- NVIDIA GPU with **8 GB+ VRAM** (Blackwell recommended for FP4 Tensor Cores)
-- **64 GB+ system RAM**
-- **~57 GB disk** for model weights
-- Python 3.11+, PyTorch 2.6+, CUDA 12.8+
-- Linux (mmap + madvise used for expert storage)
+- NVIDIA GPU with **8 GB+ VRAM**
+- System RAM > model expert weights (e.g., 64 GB for GPT-OSS-120B)
+- Python 3.11+, PyTorch 2.6+
+- Linux (mmap used for expert storage)
 
 ## Quick start
 
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from src import offload_model
+
+model = AutoModelForCausalLM.from_pretrained("mistralai/Mixtral-8x7B-v0.1", torch_dtype=torch.bfloat16)
+model = offload_model(model, device="cuda", cache_capacity=100)
+
+tokenizer = AutoTokenizer.from_pretrained("mistralai/Mixtral-8x7B-v0.1")
+inputs = tokenizer("The meaning of life is", return_tensors="pt").to("cuda")
+output = model.generate(**inputs, max_new_tokens=100)
+print(tokenizer.decode(output[0]))
+```
+
+For GPT-OSS-120B with optimized MXFP4 pipeline:
+
 ```bash
-git clone https://github.com/YOUR_USERNAME/gpt-oss-offload.git
-cd gpt-oss-offload
+git clone https://github.com/YOUR_USERNAME/moe-offload.git
+cd moe-offload
 pip install -e .
 
-# Download and split weights (~30 min, downloads ~60 GB)
 python -m scripts.split_weights --output-dir ./weights
-
-# Convert to packed binary format (faster I/O, ~10 min)
 python -m scripts.repack_experts --weights-dir ./weights
 
 # Generate text

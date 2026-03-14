@@ -1,2 +1,1 @@
-from .model import OffloadedGptOss as OffloadedGptOss
-from .generate import generate as generate
+from .offload import offload_model as offload_model
