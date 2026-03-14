@@ -3,7 +3,7 @@
 import torch
 
 from tests.conftest import requires_cuda
-from tests.test_e2e_offload import TinyMoEModel, SwiGLUExpert
+from tests.test_e2e_offload import TinyMoEModel
 
 
 @requires_cuda
@@ -33,8 +33,6 @@ def test_offloaded_model_from_hf_module():
 
     offloaded = OffloadedModel.from_module(
         model,
-        expert_module_cls=SwiGLUExpert,
-        expert_cls_kwargs={"hidden": hidden, "intermediate": intermediate},
         moe_block_attr="mlp",
         expert_list_attr="experts",
         router_attr="gate",
@@ -83,8 +81,6 @@ def test_offloaded_model_generate():
 
     offloaded = OffloadedModel.from_module(
         model,
-        expert_module_cls=SwiGLUExpert,
-        expert_cls_kwargs={"hidden": hidden, "intermediate": intermediate},
         moe_block_attr="mlp",
         expert_list_attr="experts",
         router_attr="gate",
@@ -116,8 +112,6 @@ def test_cache_stats_accessible():
 
     offloaded = OffloadedModel.from_module(
         model,
-        expert_module_cls=SwiGLUExpert,
-        expert_cls_kwargs={"hidden": 32, "intermediate": 64},
         moe_block_attr="mlp",
         expert_list_attr="experts",
         router_attr="gate",
