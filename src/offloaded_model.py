@@ -49,20 +49,32 @@ class OffloadedModel(nn.Module):
         cache_capacity: int = 0,
         returns_router_logits: bool = False,
         softmax_order: str = "topk_then_softmax",
+        first_moe_layer: int = 0,
     ) -> "OffloadedModel":
         model.eval()
         layers = model.layers
 
-        expert_weights = _extract_all_expert_weights(
-            layers, moe_block_attr, expert_list_attr,
-        )
+        moe_layers = [
+            (li, layer) for li, layer in enumerate(layers)
+            if li >= first_moe_layer and hasattr(getattr(layer, moe_block_attr, None), expert_list_attr)
+        ]
 
-        num_layers = len(layers)
-        num_experts = len(getattr(getattr(layers[0], moe_block_attr), expert_list_attr))
-        store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts)
+        expert_weights = {}
+        for store_idx, (li, layer) in enumerate(moe_layers):
+            moe_block = getattr(layer, moe_block_attr)
+            expert_list = getattr(moe_block, expert_list_attr)
+            for expert_idx, expert in enumerate(expert_list):
+                expert_tensors = {}
+                for name, param in expert.named_parameters():
+                    expert_tensors[name] = param.data.detach().cpu().clone()
+                expert_weights[(store_idx, expert_idx)] = expert_tensors
+
+        num_moe_layers = len(moe_layers)
+        num_experts = len(getattr(getattr(moe_layers[0][1], moe_block_attr), expert_list_attr))
+        store = GenericExpertStore.from_dict(expert_weights, num_moe_layers, num_experts)
 
         pipelines = []
-        for layer_idx, layer in enumerate(layers):
+        for store_idx, (li, layer) in enumerate(moe_layers):
             moe_block = getattr(layer, moe_block_attr)
             expert_list = getattr(moe_block, expert_list_attr)
             template = copy.deepcopy(expert_list[0]).to(device).to(torch.bfloat16)
@@ -70,7 +82,7 @@ class OffloadedModel(nn.Module):
             pipelines.append(pipeline)
 
             _install_offloaded_forward(
-                moe_block, pipeline, layer_idx, router_attr, top_k,
+                moe_block, pipeline, store_idx, router_attr, top_k,
                 returns_router_logits=returns_router_logits,
                 softmax_order=softmax_order,
             )
@@ -83,39 +95,34 @@ class OffloadedModel(nn.Module):
         return cls(model, pipelines)
 
 
-def _extract_all_expert_weights(layers, moe_block_attr, expert_list_attr):
-    weights = {}
-    for layer_idx, layer in enumerate(layers):
-        moe_block = getattr(layer, moe_block_attr)
-        expert_list = getattr(moe_block, expert_list_attr)
-        for expert_idx, expert in enumerate(expert_list):
-            expert_tensors = {}
-            for name, param in expert.named_parameters():
-                expert_tensors[name] = param.data.detach().cpu().clone()
-            weights[(layer_idx, expert_idx)] = expert_tensors
-    return weights
-
-
 def _extract_routing_fn(moe_block, router_attr, top_k, softmax_order):
     """Build a routing function matching the model's original routing logic."""
     router = getattr(moe_block, router_attr)
     renormalize = getattr(moe_block, "norm_topk_prob", True)
 
-    if softmax_order == "softmax_then_topk":
+    if softmax_order == "router_native":
+        def route(hidden_states):
+            top_idx, routing_weights = router(hidden_states)
+            route.last_logits = None
+            return top_idx, routing_weights.to(hidden_states.dtype)
+    elif softmax_order == "softmax_then_topk":
         def route(hidden_states):
             router_logits = router(hidden_states)
             routing_weights = F.softmax(router_logits, dim=-1, dtype=torch.float)
             routing_weights, top_idx = torch.topk(routing_weights, top_k, dim=-1)
             if renormalize:
                 routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
-            return top_idx, routing_weights.to(hidden_states.dtype), router_logits
+            route.last_logits = router_logits
+            return top_idx, routing_weights.to(hidden_states.dtype)
     else:
         def route(hidden_states):
             router_logits = router(hidden_states)
             top_vals, top_idx = torch.topk(router_logits, top_k, dim=-1)
             routing_weights = F.softmax(top_vals, dim=-1).to(hidden_states.dtype)
-            return top_idx, routing_weights, router_logits
+            route.last_logits = router_logits
+            return top_idx, routing_weights
 
+    route.last_logits = None
     return route
 
 
@@ -126,6 +133,8 @@ def _install_offloaded_forward(
 ):
     route = _extract_routing_fn(moe_block, router_attr, top_k, softmax_order)
 
+    shared_expert = getattr(moe_block, "shared_experts", None)
+
     def offloaded_forward(hidden_states, **_kwargs):
         if hidden_states.dim() == 3:
             batch, seq_len, hidden = hidden_states.shape
@@ -134,14 +143,17 @@ def _install_offloaded_forward(
             flat = hidden_states
             batch, seq_len = None, None
 
-        top_idx, routing_weights, router_logits = route(flat)
+        top_idx, routing_weights = route(flat)
         output = pipeline.execute_layer_experts(flat, layer_idx, top_idx, routing_weights)
+
+        if shared_expert is not None:
+            output = output + shared_expert(flat)
 
         if batch is not None:
             output = output.view(batch, seq_len, -1)
 
         if returns_router_logits:
-            return output, router_logits
+            return output, route.last_logits
         return output
 
     moe_block.forward = offloaded_forward

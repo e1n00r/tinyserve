@@ -8,7 +8,8 @@ from tests.conftest import requires_cuda
 def _offload_and_compare(model_cls, config,
                          moe_block_attr, expert_list_attr, router_attr,
                          top_k, returns_router_logits, device,
-                         softmax_order="topk_then_softmax", n_gen_tokens=5):
+                         softmax_order="topk_then_softmax",
+                         first_moe_layer=0, n_gen_tokens=5, atol=0):
     """Shared helper: offload model, compare logits + autoregressive tokens."""
     from src.offloaded_model import OffloadedModel
 
@@ -33,6 +34,7 @@ def _offload_and_compare(model_cls, config,
         cache_capacity=32,
         returns_router_logits=returns_router_logits,
         softmax_order=softmax_order,
+        first_moe_layer=first_moe_layer,
     )
     model.model = offloaded.model
     model = model.to(device)
@@ -40,7 +42,7 @@ def _offload_and_compare(model_cls, config,
     with torch.no_grad():
         offloaded_logits = model(input_ids).logits
 
-    torch.testing.assert_close(offloaded_logits, ref_logits, rtol=0, atol=0)
+    torch.testing.assert_close(offloaded_logits, ref_logits, rtol=0, atol=atol)
 
     with torch.no_grad():
         ref_tokens = []
@@ -62,6 +64,7 @@ def _offload_and_compare(model_cls, config,
         cache_capacity=32,
         returns_router_logits=returns_router_logits,
         softmax_order=softmax_order,
+        first_moe_layer=first_moe_layer,
     )
     ref_model_2.model = offloaded_2.model
     ref_model_2 = ref_model_2.to(device)
@@ -112,4 +115,26 @@ def test_qwen3_moe():
         "mlp", "experts", "gate", top_k=2,
         returns_router_logits=True, device=torch.device("cuda"),
         softmax_order="softmax_then_topk",
+    )
+
+
+@requires_cuda
+def test_deepseek_v3():
+    from transformers import DeepseekV3Config, DeepseekV3ForCausalLM
+
+    torch.manual_seed(42)
+    config = DeepseekV3Config(
+        vocab_size=256, hidden_size=64, intermediate_size=128,
+        num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=2,
+        n_routed_experts=8, num_experts_per_tok=2,
+        max_position_embeddings=64,
+        first_k_dense_replace=2, n_group=2, topk_group=1,
+        n_shared_experts=1, moe_intermediate_size=64,
+    )
+    _offload_and_compare(
+        DeepseekV3ForCausalLM, config,
+        "mlp", "experts", "gate", top_k=2,
+        returns_router_logits=False, device=torch.device("cuda"),
+        softmax_order="router_native", first_moe_layer=2,
+        atol=0.01,
     )
