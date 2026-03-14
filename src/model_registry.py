@@ -83,4 +83,16 @@ def profile_from_config(config: PretrainedConfig) -> ModelProfile:
             shared_expert_attr="shared_experts",
         )
 
+    if model_type == "olmoe":
+        return ModelProfile(
+            moe_block_attr="mlp",
+            expert_list_attr="experts",
+            expert_layout=ExpertLayout(
+                weight_names=["gate_proj", "up_proj", "down_proj"],
+            ),
+            num_experts=config.num_experts,
+            num_experts_per_tok=config.num_experts_per_tok,
+            num_layers=config.num_hidden_layers,
+        )
+
     raise ValueError(f"Unsupported model type: {model_type}")

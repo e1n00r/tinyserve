@@ -20,6 +20,7 @@ _ROUTING_MAP = {
     "qwen2_moe": ("softmax_then_topk", True, "gate"),
     "deepseek_v3": ("router_native", False, "gate"),
     "gpt_oss": ("router_native", True, "router"),
+    "olmoe": ("softmax_then_topk", True, "gate"),
 }
 
 
