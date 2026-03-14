@@ -47,6 +47,7 @@ class OffloadedModel(nn.Module):
         top_k: int,
         device: torch.device,
         cache_capacity: int = 0,
+        returns_router_logits: bool = False,
     ) -> "OffloadedModel":
         model.eval()
         layers = model.layers
@@ -68,6 +69,7 @@ class OffloadedModel(nn.Module):
 
             _install_offloaded_forward(
                 moe_block, pipeline, layer_idx, router_attr, top_k,
+                returns_router_logits=returns_router_logits,
             )
 
             expert_list = getattr(moe_block, expert_list_attr)
@@ -92,10 +94,13 @@ def _extract_all_expert_weights(layers, moe_block_attr, expert_list_attr):
     return weights
 
 
-def _install_offloaded_forward(moe_block, pipeline, layer_idx, router_attr, top_k):
+def _install_offloaded_forward(
+    moe_block, pipeline, layer_idx, router_attr, top_k,
+    returns_router_logits: bool = False,
+):
     router = getattr(moe_block, router_attr)
 
-    def offloaded_forward(hidden_states):
+    def offloaded_forward(hidden_states, **_kwargs):
         if hidden_states.dim() == 3:
             batch, seq_len, hidden = hidden_states.shape
             flat = hidden_states.view(-1, hidden)
@@ -103,14 +108,17 @@ def _install_offloaded_forward(moe_block, pipeline, layer_idx, router_attr, top_
             flat = hidden_states
             batch, seq_len = None, None
 
-        logits = router(flat)
-        top_vals, top_idx = torch.topk(logits, top_k, dim=-1)
+        router_logits = router(flat)
+        top_vals, top_idx = torch.topk(router_logits, top_k, dim=-1)
         routing_weights = F.softmax(top_vals, dim=-1).to(flat.dtype)
 
         output = pipeline.execute_layer_experts(flat, layer_idx, top_idx, routing_weights)
 
         if batch is not None:
-            return output.view(batch, seq_len, -1)
+            output = output.view(batch, seq_len, -1)
+
+        if returns_router_logits:
+            return output, router_logits
         return output
 
     moe_block.forward = offloaded_forward
