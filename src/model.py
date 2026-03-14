@@ -1,4 +1,4 @@
-"""Offloaded GPT-OSS-120B with hybrid KV cache and pipelined expert loading."""
+"""Offloaded GPT-OSS-120B with GPU-resident KV cache and pipelined expert loading."""
 
 import time
 
@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file
 
-from .attention import attention_forward, attention_forward_fp8, rms_norm
+from .attention import attention_forward_fp8, rms_norm, _fp8_linear
 from .config import (
     EXPERT_BYTES,
     HIDDEN_SIZE,
@@ -17,18 +17,17 @@ from .config import (
 )
 from .expert_store import ExpertBuffer, ExpertStore
 from .experts import expert_forward
-from .kv_cache import HybridKVCache
+from .kv_cache import KVCache
 from .lru_cache import ExpertLRUCache
 from .pipeline import ExpertPipeline
 from .rope import build_rope_cache
 
 
 class OffloadedGptOss:
-    """GPT-OSS-120B with expert weights in CPU pinned memory.
+    """GPT-OSS-120B with expert offloading.
 
     Non-expert weights (attention, embeddings, router, norms) live on GPU.
     Expert weights are loaded to GPU on demand via double-buffered pipeline.
-    KV cache: sliding-window layers on GPU, full-attention layers on CPU.
     """
 
     def __init__(
@@ -65,9 +64,14 @@ class OffloadedGptOss:
         self.expert_store = ExpertStore(weights_dir)
         self.expert_store.load()
 
-        # Auto-size cache from remaining VRAM
+        self.cos_cache, self.sin_cache = build_rope_cache(self.device, self.dtype)
+        self.kv_cache = KVCache(self.device)
+        print(f"  KV cache: {self.kv_cache.vram_bytes() / 1024**2:.0f} MB on GPU "
+              f"(max {self.kv_cache.max_seq_len} tokens)")
+
+        # Auto-size expert cache from remaining VRAM (after KV is allocated)
         if cache_capacity is None and pipeline:
-            reserved = 512 * 1024 * 1024  # 512 MB headroom for dequant temps, KV, activations
+            reserved = 256 * 1024 * 1024  # 256 MB headroom for dequant temps + activations
             free_mem = torch.cuda.mem_get_info(self.device)[0] - reserved
             cache_capacity = ExpertLRUCache.estimate_capacity(max(0, free_mem))
             print(f"  Auto-sized expert LRU cache: {cache_capacity} experts "
@@ -80,9 +84,6 @@ class OffloadedGptOss:
             )
         else:
             self.expert_buf = ExpertBuffer(self.device)
-
-        self.cos_cache, self.sin_cache = build_rope_cache(self.device, self.dtype)
-        self.kv_cache = HybridKVCache(self.device)
 
         mode = "pipelined" + (f"+cache({cache_capacity})" if cache_capacity else "") if pipeline else "blocking"
         print(f"Model ready ({mode}).")
@@ -250,8 +251,6 @@ class OffloadedGptOss:
             timings["experts"] += time.perf_counter() - t0
 
         h = rms_norm(h, self._w("model.norm.weight"))
-        # FP8 lm_head via _scaled_mm
-        from .attention import _fp8_linear
         logits = _fp8_linear(
             h, self._w("lm_head.weight"),
             self._fp8_scales["lm_head.weight"], bias=None,

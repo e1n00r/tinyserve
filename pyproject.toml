@@ -1,8 +1,13 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "gpt-oss-offload"
 version = "0.1.0"
-description = "GPU-compute MoE expert offloading for GPT-OSS-120B on consumer GPUs"
+description = "Run GPT-OSS-120B (117B MoE) on a single 8GB GPU at 14 tok/s"
 requires-python = ">=3.11"
+license = {text = "MIT"}
 dependencies = [
     "torch>=2.6",
     "transformers>=4.50",
@@ -11,4 +16,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["requires_cuda: test needs NVIDIA GPU"]

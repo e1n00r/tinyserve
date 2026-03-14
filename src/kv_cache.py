@@ -1,32 +1,41 @@
-"""Hybrid KV cache: sliding-window layers on GPU, full-attention layers on CPU."""
+"""GPU-resident KV cache with pre-allocated buffers."""
 
 import torch
 
 from .config import HEAD_DIM, LAYER_TYPES, NUM_KV_HEADS, NUM_LAYERS, SLIDING_WINDOW
 
+_DEFAULT_MAX_SEQ = 2048
 
-class HybridKVCache:
-    """KV cache that keeps sliding-window layers on GPU and full-attention on CPU.
 
-    Sliding-window layers only need the last SLIDING_WINDOW tokens, so their
-    KV is tiny and always resident on GPU. Full-attention layers need all past
-    tokens, so their KV lives in pinned CPU memory and is transferred to GPU
-    on demand per layer.
+class KVCache:
+    """All-GPU KV cache with pre-allocated buffers.
+
+    Sliding-window layers use a circular buffer of SLIDING_WINDOW tokens.
+    Full-attention layers use a linear buffer up to max_seq_len tokens.
+    No CPU↔GPU transfers, no torch.cat per step.
     """
 
-    def __init__(self, device: torch.device, dtype: torch.dtype = torch.float8_e4m3fn):
+    def __init__(
+        self,
+        device: torch.device,
+        dtype: torch.dtype = torch.float8_e4m3fn,
+        max_seq_len: int = _DEFAULT_MAX_SEQ,
+    ):
         self.device = device
         self.dtype = dtype
-        self.seq_len = 0
+        self.max_seq_len = max_seq_len
 
-        # Per-layer storage. None until first update.
-        # Sliding-window layers: (K, V) on GPU, circular buffer of SLIDING_WINDOW tokens
-        # Full-attention layers: (K, V) on CPU pinned memory
-        self._k: list[torch.Tensor | None] = [None] * NUM_LAYERS
-        self._v: list[torch.Tensor | None] = [None] * NUM_LAYERS
-
-    def _is_sliding(self, layer_idx: int) -> bool:
-        return LAYER_TYPES[layer_idx] == "sliding_attention"
+        # Pre-allocate all buffers on GPU
+        self._k = torch.zeros(
+            NUM_LAYERS, 1, NUM_KV_HEADS, max_seq_len, HEAD_DIM,
+            dtype=dtype, device=device,
+        )
+        self._v = torch.zeros(
+            NUM_LAYERS, 1, NUM_KV_HEADS, max_seq_len, HEAD_DIM,
+            dtype=dtype, device=device,
+        )
+        # Per-layer sequence length (how many tokens stored)
+        self._seq_lens = [0] * NUM_LAYERS
 
     def update(
         self,
@@ -34,68 +43,60 @@ class HybridKVCache:
         new_k: torch.Tensor,
         new_v: torch.Tensor,
     ):
-        """Append new K, V for this layer. Handles GPU vs CPU placement.
+        """Append new K, V tokens for this layer (in-place, no allocation).
 
         Args:
-            new_k: [batch, num_kv_heads, new_len, head_dim] in compute dtype
+            new_k: [batch, num_kv_heads, new_len, head_dim]
             new_v: same shape
         """
-        # Quantize to cache dtype
+        new_len = new_k.shape[2]
         k_store = new_k.to(self.dtype)
         v_store = new_v.to(self.dtype)
 
-        if self._is_sliding(layer_idx):
-            # Keep on GPU, truncate to sliding window
-            if self._k[layer_idx] is None:
-                self._k[layer_idx] = k_store
-                self._v[layer_idx] = v_store
+        if LAYER_TYPES[layer_idx] == "sliding_attention":
+            cur = self._seq_lens[layer_idx]
+            if cur + new_len <= SLIDING_WINDOW:
+                self._k[layer_idx, :, :, cur:cur + new_len] = k_store
+                self._v[layer_idx, :, :, cur:cur + new_len] = v_store
+                self._seq_lens[layer_idx] = cur + new_len
             else:
-                self._k[layer_idx] = torch.cat([self._k[layer_idx], k_store], dim=2)
-                self._v[layer_idx] = torch.cat([self._v[layer_idx], v_store], dim=2)
-                # Trim to sliding window
-                if self._k[layer_idx].shape[2] > SLIDING_WINDOW:
-                    self._k[layer_idx] = self._k[layer_idx][:, :, -SLIDING_WINDOW:]
-                    self._v[layer_idx] = self._v[layer_idx][:, :, -SLIDING_WINDOW:]
+                # Shift old tokens left, append new at end
+                keep = SLIDING_WINDOW - new_len
+                if keep > 0 and cur > 0:
+                    src_start = min(cur, self.max_seq_len) - keep
+                    if src_start >= 0:
+                        self._k[layer_idx, :, :, :keep] = self._k[layer_idx, :, :, src_start:src_start + keep].clone()
+                        self._v[layer_idx, :, :, :keep] = self._v[layer_idx, :, :, src_start:src_start + keep].clone()
+                self._k[layer_idx, :, :, keep:keep + new_len] = k_store
+                self._v[layer_idx, :, :, keep:keep + new_len] = v_store
+                self._seq_lens[layer_idx] = SLIDING_WINDOW
         else:
-            # Move to CPU pinned memory
-            k_cpu = k_store.cpu().pin_memory()
-            v_cpu = v_store.cpu().pin_memory()
-            if self._k[layer_idx] is None:
-                self._k[layer_idx] = k_cpu
-                self._v[layer_idx] = v_cpu
-            else:
-                self._k[layer_idx] = torch.cat([self._k[layer_idx], k_cpu], dim=2)
-                self._v[layer_idx] = torch.cat([self._v[layer_idx], v_cpu], dim=2)
+            cur = self._seq_lens[layer_idx]
+            end = cur + new_len
+            if end > self.max_seq_len:
+                raise RuntimeError(
+                    f"KV cache overflow: {end} > {self.max_seq_len}. "
+                    f"Increase max_seq_len."
+                )
+            self._k[layer_idx, :, :, cur:end] = k_store
+            self._v[layer_idx, :, :, cur:end] = v_store
+            self._seq_lens[layer_idx] = end
 
     def get_kv(
         self,
         layer_idx: int,
-        non_blocking: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Get KV for attention computation, on GPU.
-
-        For sliding-window layers, already on GPU. For full-attention layers,
-        transfers from CPU pinned memory.
-
-        Returns None if no cache exists yet (first token).
-        """
-        if self._k[layer_idx] is None:
+        """Get KV for attention. Returns views (no copy, no transfer)."""
+        seq_len = self._seq_lens[layer_idx]
+        if seq_len == 0:
             return None
-
-        k = self._k[layer_idx]
-        v = self._v[layer_idx]
-
-        if self._is_sliding(layer_idx):
-            # Already on GPU, just upcast
-            return k.to(self.device), v.to(self.device)
-        else:
-            # Transfer from CPU pinned → GPU
-            return (
-                k.to(self.device, non_blocking=non_blocking),
-                v.to(self.device, non_blocking=non_blocking),
-            )
+        return (
+            self._k[layer_idx, :, :, :seq_len],
+            self._v[layer_idx, :, :, :seq_len],
+        )
 
     def reset(self):
-        self._k = [None] * NUM_LAYERS
-        self._v = [None] * NUM_LAYERS
-        self.seq_len = 0
+        self._seq_lens = [0] * NUM_LAYERS
+
+    def vram_bytes(self) -> int:
+        return self._k.nbytes + self._v.nbytes

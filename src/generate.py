@@ -3,6 +3,7 @@
 import time
 
 import torch
+import torch.nn.functional as F
 from transformers import AutoTokenizer
 
 from .config import MODEL_ID
@@ -17,13 +18,11 @@ def generate(
     temperature: float = 0.7,
     top_p: float = 0.9,
 ) -> str:
-    """Autoregressive text generation."""
     input_ids = tokenizer.encode(prompt, return_tensors="pt").to(model.device)
     batch, prompt_len = input_ids.shape
 
     model.reset()
 
-    # Prefill: process entire prompt
     position_ids = torch.arange(prompt_len, device=model.device).unsqueeze(0)
     print(f"Prefilling {prompt_len} tokens...")
     t0 = time.perf_counter()
@@ -31,31 +30,22 @@ def generate(
     prefill_time = time.perf_counter() - t0
     print(f"  Prefill: {prefill_time:.2f}s ({prompt_len / prefill_time:.1f} tok/s)")
 
-    # Sample first token
-    next_logits = logits[:, -1, :]
-    next_token = _sample(next_logits, temperature, top_p)
+    next_token = _sample(logits[:, -1, :], temperature, top_p)
     generated = [next_token.item()]
 
-    # Decode loop
     total_timings = {k: 0.0 for k in timings}
     decode_start = time.perf_counter()
 
     for step in range(1, max_new_tokens):
-        position_ids = torch.tensor(
-            [[prompt_len + step - 1]], device=model.device
-        )
-        logits, timings = model.forward(
-            next_token.unsqueeze(0), position_ids
-        )
+        position_ids = torch.tensor([[prompt_len + step - 1]], device=model.device)
+        logits, timings = model.forward(next_token.unsqueeze(0), position_ids)
 
         for k, v in timings.items():
-            total_timings[k] += v
+            total_timings[k] = total_timings.get(k, 0.0) + v
 
-        next_logits = logits[:, -1, :]
-        next_token = _sample(next_logits, temperature, top_p)
+        next_token = _sample(logits[:, -1, :], temperature, top_p)
         generated.append(next_token.item())
 
-        # Check for EOS
         if next_token.item() == tokenizer.eos_token_id:
             break
 
@@ -70,7 +60,6 @@ def generate(
           f"router={total_timings['router']:.2f}s, "
           f"experts={total_timings['experts']:.2f}s")
 
-    # Report cache stats if available
     if hasattr(model, 'expert_pipeline') and model.expert_pipeline.cache is not None:
         cache = model.expert_pipeline.cache
         print(f"  Cache: {cache.hits} hits, {cache.misses} misses, "
@@ -80,11 +69,7 @@ def generate(
     return tokenizer.decode(output_ids, skip_special_tokens=True)
 
 
-def _sample(
-    logits: torch.Tensor,
-    temperature: float,
-    top_p: float,
-) -> torch.Tensor:
+def _sample(logits: torch.Tensor, temperature: float, top_p: float) -> torch.Tensor:
     if temperature <= 0:
         return logits.argmax(dim=-1)
 
@@ -92,7 +77,6 @@ def _sample(
     sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
     cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
 
-    # Remove tokens with cumulative prob above top_p
     sorted_indices_to_remove = cumulative_probs > top_p
     sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
     sorted_indices_to_remove[..., 0] = False
@@ -102,12 +86,7 @@ def _sample(
     )
     logits[indices_to_remove] = float("-inf")
 
-    probs = torch.softmax(logits, dim=-1)
-    return torch.multinomial(probs, num_samples=1).squeeze(-1)
-
-
-# Need this import for _sample
-import torch.nn.functional as F
+    return torch.multinomial(torch.softmax(logits, dim=-1), num_samples=1).squeeze(-1)
 
 
 def main():

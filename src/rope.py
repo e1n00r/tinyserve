@@ -6,7 +6,6 @@ import torch
 
 from .config import (
     HEAD_DIM,
-    MAX_POSITION_EMBEDDINGS,
     ROPE_SCALING,
     ROPE_THETA,
 )
@@ -44,8 +43,6 @@ def build_rope_cache(
     factor = ROPE_SCALING["factor"]
     beta_fast = ROPE_SCALING["beta_fast"]
     beta_slow = ROPE_SCALING["beta_slow"]
-    original_max_pos = ROPE_SCALING["original_max_position_embeddings"]
-
     dim = HEAD_DIM
     half_dim = dim // 2
 

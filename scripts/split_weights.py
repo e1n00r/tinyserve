@@ -11,7 +11,6 @@ import json
 import os
 from pathlib import Path
 
-import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -20,7 +19,6 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.config import (
     MODEL_ID,
-    NUM_EXPERTS,
     NUM_LAYERS,
     is_expert_key,
     parse_expert_key,

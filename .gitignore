@@ -11,3 +11,5 @@ build/
 *.pth
 .env
 weights/
+downloads/
+.pytest_cache/
