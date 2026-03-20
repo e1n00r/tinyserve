@@ -31,6 +31,7 @@ def offload_model(
     device: str | torch.device = "cuda",
     cache_capacity: int = 0,
     model_id: str | None = None,
+    cache_policy: str = "lru",
 ) -> torch.nn.Module:
     """Offload MoE experts from an HF model to CPU with GPU LRU cache.
 
@@ -45,6 +46,8 @@ def offload_model(
             with native quantized expert weights (e.g. MXFP4), expert tensors
             are loaded directly from safetensors, bypassing HF dequantization.
             Non-expert weights remain as loaded in ``model``.
+        cache_policy: eviction policy for the expert cache ('lru', 'slru',
+            'lfu', or 'fifo'). Default 'lru'.
 
     Returns:
         The same model object with experts offloaded. Call model(input_ids)
@@ -74,6 +77,7 @@ def offload_model(
         softmax_order=softmax_order,
         first_moe_layer=profile.first_moe_layer,
         model_id=model_id,
+        cache_policy=cache_policy,
     )
 
     if hasattr(model, "model"):
@@ -81,3 +85,43 @@ def offload_model(
     model._offload_pipelines = offloaded.pipelines
     model = model.to(device)
     return model
+
+
+def load_and_offload(
+    model_id: str,
+    device: str | torch.device = "cuda",
+    cache_capacity: int = 0,
+    cache_policy: str = "lru",
+    flash_attention: bool = True,
+    torch_dtype=torch.bfloat16,
+    **hf_kwargs,
+) -> torch.nn.Module:
+    """Load a HuggingFace MoE model and immediately offload its experts.
+
+    Args:
+        model_id: HuggingFace repo id or local path
+        device: GPU device
+        cache_capacity: expert slots in VRAM (0 = auto)
+        cache_policy: 'lru', 'slru', 'lfu', or 'fifo'
+        flash_attention: use flash_attention_2 if available (default True)
+        torch_dtype: weight dtype (default bfloat16)
+        **hf_kwargs: passed through to AutoModelForCausalLM.from_pretrained
+    """
+    from transformers import AutoModelForCausalLM
+
+    attn_impl = "eager"
+    if flash_attention:
+        try:
+            import flash_attn  # noqa: F401
+            attn_impl = "flash_attention_2"
+        except ImportError:
+            pass
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=torch_dtype,
+        attn_implementation=attn_impl,
+        **hf_kwargs,
+    )
+    return offload_model(model, device=device, cache_capacity=cache_capacity,
+                         cache_policy=cache_policy)

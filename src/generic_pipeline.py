@@ -39,6 +39,7 @@ class GenericExpertPipeline:
         transfer_stream: torch.cuda.Stream,
         compute_stream: torch.cuda.Stream,
         cache: GenericLRUCache | None = None,
+        shared_stream: torch.cuda.Stream | None = None,
     ):
         self.store = store
         self.template = template
@@ -51,6 +52,7 @@ class GenericExpertPipeline:
         self.compute_stream = compute_stream
 
         self.cache = cache
+        self.shared_stream = shared_stream if shared_stream is not None else torch.cuda.Stream(device)
 
     def execute_layer_experts(
         self,

@@ -77,6 +77,7 @@ class OffloadedModel(nn.Module):
         softmax_order: str = "topk_then_softmax",
         first_moe_layer: int = 0,
         model_id: str | None = None,
+        cache_policy: str = "lru",
     ) -> "OffloadedModel":
         model.eval()
         layers = model.layers
@@ -125,8 +126,9 @@ class OffloadedModel(nn.Module):
         shared_buf_b = store.allocate_buffer(device)
         transfer_stream = torch.cuda.Stream(device)
         compute_stream = torch.cuda.Stream(device)
+        shared_stream = torch.cuda.Stream(device)
         from .generic_store import GenericLRUCache
-        cache = GenericLRUCache(cache_capacity, store.expert_bytes, device) if cache_capacity > 0 else None
+        cache = GenericLRUCache(cache_capacity, store.expert_bytes, device, policy=cache_policy) if cache_capacity > 0 else None
 
         print(f"  Cache capacity: {cache_capacity} experts ({cache_capacity * store.expert_bytes / 1e9:.2f} GB GPU)")
 
@@ -140,6 +142,7 @@ class OffloadedModel(nn.Module):
                 transfer_stream=transfer_stream,
                 compute_stream=compute_stream,
                 cache=cache,
+                shared_stream=shared_stream,
             )
             pipelines.append(pipeline)
 
@@ -326,10 +329,20 @@ def _install_offloaded_forward(
             batch, seq_len = None, None
 
         top_idx, routing_weights = route(flat)
+
+        shared_event = None
+        shared_out = None
+        if shared_expert is not None:
+            with torch.cuda.stream(pipeline.shared_stream):
+                shared_out = shared_expert(flat)
+                shared_event = torch.cuda.Event()
+                shared_event.record(pipeline.shared_stream)
+
         output = pipeline.execute_layer_experts(flat, layer_idx, top_idx, routing_weights)
 
-        if shared_expert is not None:
-            output = output + shared_expert(flat)
+        if shared_event is not None:
+            torch.cuda.current_stream().wait_event(shared_event)
+            output = output + shared_out
 
         if batch is not None:
             output = output.view(batch, seq_len, -1)

@@ -7,10 +7,10 @@ The buffer layout is computed at init time from actual weight shapes.
 
 import gc
 import tempfile
-from collections import OrderedDict
-
 import numpy as np
 import torch
+
+from .cache_policy import make_policy
 
 
 def _is_qtensor(param) -> bool:
@@ -296,32 +296,32 @@ class GenericExpertStore:
 class GenericLRUCache:
     """LRU cache for generic expert buffers in GPU VRAM."""
 
-    def __init__(self, capacity: int, expert_bytes: int, device: torch.device):
+    def __init__(self, capacity: int, expert_bytes: int, device: torch.device, policy: str = "lru"):
         self.capacity = capacity
         self.expert_bytes = expert_bytes
         self.device = device
         self._packed = torch.empty(capacity, expert_bytes, dtype=torch.uint8, device=device)
-        self._lru: OrderedDict[tuple[int, int], int] = OrderedDict()
+        self._policy = make_policy(policy, capacity)
         self._free_slots = list(range(capacity - 1, -1, -1))
         self.hits = 0
         self.misses = 0
 
     def lookup(self, layer_idx: int, expert_idx: int) -> int | None:
-        key = (layer_idx, expert_idx)
-        if key in self._lru:
-            self._lru.move_to_end(key)
+        slot = self._policy.lookup((layer_idx, expert_idx))
+        if slot is not None:
             self.hits += 1
-            return self._lru[key]
-        self.misses += 1
-        return None
+        else:
+            self.misses += 1
+        return slot
 
     def allocate(self, layer_idx: int, expert_idx: int) -> int:
         key = (layer_idx, expert_idx)
         if self._free_slots:
             slot = self._free_slots.pop()
         else:
-            _, slot = self._lru.popitem(last=False)
-        self._lru[key] = slot
+            evict_key, slot = self._policy.select_evict()
+            self._policy.remove(evict_key)
+        self._policy.insert(key, slot)
         return slot
 
     def store_from_buffer(self, slot: int, buf: GenericExpertBuffer):

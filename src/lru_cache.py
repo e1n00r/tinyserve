@@ -1,9 +1,8 @@
 """GPU-resident LRU cache for hot experts."""
 
-from collections import OrderedDict
-
 import torch
 
+from .cache_policy import make_policy
 from .config import EXPERT_BYTES
 from .expert_store import _create_expert_views
 
@@ -15,11 +14,11 @@ class ExpertLRUCache:
     single GPU->GPU copy of the packed buffer.
     """
 
-    def __init__(self, capacity: int, device: torch.device):
+    def __init__(self, capacity: int, device: torch.device, policy: str = "lru"):
         self.capacity = capacity
         self.device = device
 
-        self._lru: OrderedDict[tuple[int, int], int] = OrderedDict()
+        self._policy = make_policy(policy, capacity)
         self._free_slots: list[int] = list(range(capacity - 1, -1, -1))
 
         self._packed = torch.empty((capacity, EXPERT_BYTES), dtype=torch.uint8, device=device)
@@ -34,21 +33,21 @@ class ExpertLRUCache:
         return self._packed[slot]
 
     def lookup(self, layer_idx: int, expert_idx: int) -> int | None:
-        key = (layer_idx, expert_idx)
-        if key in self._lru:
-            self._lru.move_to_end(key)
+        slot = self._policy.lookup((layer_idx, expert_idx))
+        if slot is not None:
             self.hits += 1
-            return self._lru[key]
-        self.misses += 1
-        return None
+        else:
+            self.misses += 1
+        return slot
 
     def allocate(self, layer_idx: int, expert_idx: int) -> int:
         key = (layer_idx, expert_idx)
         if self._free_slots:
             slot = self._free_slots.pop()
         else:
-            _, slot = self._lru.popitem(last=False)
-        self._lru[key] = slot
+            evict_key, slot = self._policy.select_evict()
+            self._policy.remove(evict_key)
+        self._policy.insert(key, slot)
         return slot
 
     @property
