@@ -30,6 +30,7 @@ def offload_model(
     model: torch.nn.Module,
     device: str | torch.device = "cuda",
     cache_capacity: int = 0,
+    model_id: str | None = None,
 ) -> torch.nn.Module:
     """Offload MoE experts from an HF model to CPU with GPU LRU cache.
 
@@ -40,6 +41,10 @@ def offload_model(
         model: HuggingFace CausalLM model (e.g., MixtralForCausalLM)
         device: GPU device for non-expert weights and cache
         cache_capacity: number of experts to cache in VRAM (0 = no cache)
+        model_id: HuggingFace repo id or local path. When provided for models
+            with native quantized expert weights (e.g. MXFP4), expert tensors
+            are loaded directly from safetensors, bypassing HF dequantization.
+            Non-expert weights remain as loaded in ``model``.
 
     Returns:
         The same model object with experts offloaded. Call model(input_ids)
@@ -68,6 +73,7 @@ def offload_model(
         returns_router_logits=returns_logits,
         softmax_order=softmax_order,
         first_moe_layer=profile.first_moe_layer,
+        model_id=model_id,
     )
 
     if hasattr(model, "model"):

@@ -13,3 +13,5 @@ build/
 weights/
 downloads/
 .pytest_cache/
+docs/
+*.sh

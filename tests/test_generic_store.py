@@ -6,6 +6,57 @@ import pytest
 from tests.conftest import requires_cuda
 
 
+class QTensor:
+    """Minimal optimum-quanto QTensor stand-in for unit testing.
+
+    _is_qtensor checks type.__name__ == 'QTensor', so the class must be named exactly that.
+    """
+    def __init__(self, int_data: torch.Tensor, scale: torch.Tensor):
+        self.int_data = int_data
+        self.scale = scale
+
+    @property
+    def data(self):
+        return self.int_data.float()  # quanto returns dequantized on .data
+
+    @property
+    def shape(self):
+        return self.int_data.shape
+
+    @property
+    def dtype(self):
+        return self.int_data.dtype
+
+
+def test_expand_param_qtensor():
+    """QTensor params are expanded to blocks+scales with correct naming."""
+    from src.generic_store import _is_qtensor, _expand_param
+
+    int_data = torch.randint(0, 255, (4, 8, 16), dtype=torch.uint8)
+    scale = torch.randint(0, 255, (4, 8), dtype=torch.uint8)
+    qt = QTensor(int_data, scale)
+
+    assert _is_qtensor(qt)
+
+    result = _expand_param("gate_up_proj", qt, expert_idx=None)
+    assert set(result.keys()) == {"gate_up_proj", "gate_up_proj_scales"}
+    torch.testing.assert_close(result["gate_up_proj"], int_data.cpu())
+    torch.testing.assert_close(result["gate_up_proj_scales"], scale.cpu())
+
+
+def test_expand_param_qtensor_sliced():
+    """Expert-index slicing on QTensor expansion picks the right expert row."""
+    from src.generic_store import _expand_param
+
+    int_data = torch.randint(0, 255, (8, 16, 4), dtype=torch.uint8)
+    scale = torch.randint(0, 255, (8, 16), dtype=torch.uint8)
+    qt = QTensor(int_data, scale)
+
+    result = _expand_param("gate_up_proj", qt, expert_idx=3)
+    torch.testing.assert_close(result["gate_up_proj"], int_data[3].cpu())
+    torch.testing.assert_close(result["gate_up_proj_scales"], scale[3].cpu())
+
+
 @requires_cuda
 def test_store_and_retrieve_expert_weights():
     """Store BF16 expert weights on CPU, retrieve to GPU, values match."""

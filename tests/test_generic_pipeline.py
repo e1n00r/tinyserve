@@ -80,7 +80,15 @@ def test_generic_pipeline_matches_direct():
     device = torch.device("cuda")
     template = TinySwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
 
-    pipeline = GenericExpertPipeline(store, template, device, cache_capacity=4)
+    from src.generic_store import GenericLRUCache
+    pipeline = GenericExpertPipeline(
+        store, template, device,
+        buf_a=store.allocate_buffer(device),
+        buf_b=store.allocate_buffer(device),
+        transfer_stream=torch.cuda.Stream(device),
+        compute_stream=torch.cuda.Stream(device),
+        cache=GenericLRUCache(4, store.expert_bytes, device),
+    )
 
     h = torch.randn(1, hidden, device=device, dtype=torch.bfloat16)
     expert_indices = torch.tensor([[2, 5]])
@@ -117,7 +125,15 @@ def test_cache_hits_match_misses():
     device = torch.device("cuda")
     template = TinySwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
 
-    pipeline = GenericExpertPipeline(store, template, device, cache_capacity=8)
+    from src.generic_store import GenericLRUCache
+    pipeline = GenericExpertPipeline(
+        store, template, device,
+        buf_a=store.allocate_buffer(device),
+        buf_b=store.allocate_buffer(device),
+        transfer_stream=torch.cuda.Stream(device),
+        compute_stream=torch.cuda.Stream(device),
+        cache=GenericLRUCache(8, store.expert_bytes, device),
+    )
 
     h = torch.randn(1, hidden, device=device, dtype=torch.bfloat16)
     expert_indices = torch.tensor([[0, 3]])
@@ -145,7 +161,14 @@ def test_multi_token():
     device = torch.device("cuda")
     template = TinySwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
 
-    pipeline = GenericExpertPipeline(store, template, device, cache_capacity=0)
+    pipeline = GenericExpertPipeline(
+        store, template, device,
+        buf_a=store.allocate_buffer(device),
+        buf_b=store.allocate_buffer(device),
+        transfer_stream=torch.cuda.Stream(device),
+        compute_stream=torch.cuda.Stream(device),
+        cache=None,
+    )
 
     num_tokens = 3
     h = torch.randn(num_tokens, hidden, device=device, dtype=torch.bfloat16)

@@ -112,11 +112,24 @@ def test_offloaded_model_matches_reference():
 
     expert_weights = _extract_expert_weights(model, num_layers, num_experts)
     store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts)
+    from src.generic_store import GenericLRUCache
+    shared_buf_a = store.allocate_buffer(device)
+    shared_buf_b = store.allocate_buffer(device)
+    transfer_stream = torch.cuda.Stream(device)
+    compute_stream = torch.cuda.Stream(device)
+    shared_cache = GenericLRUCache(16, store.expert_bytes, device)
+    template = SwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
 
     for li in range(num_layers):
         moe = model.layers[li].mlp
-        template = SwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
-        pipeline = GenericExpertPipeline(store, template, device, cache_capacity=16)
+        pipeline = GenericExpertPipeline(
+            store, template, device,
+            buf_a=shared_buf_a,
+            buf_b=shared_buf_b,
+            transfer_stream=transfer_stream,
+            compute_stream=compute_stream,
+            cache=shared_cache,
+        )
 
         def make_offloaded_forward(layer_idx, pipe, gate):
             def offloaded_forward(hidden_states):
@@ -165,11 +178,24 @@ def test_offloaded_autoregressive_matches():
 
     expert_weights = _extract_expert_weights(model, num_layers, num_experts)
     store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts)
+    from src.generic_store import GenericLRUCache
+    shared_buf_a = store.allocate_buffer(device)
+    shared_buf_b = store.allocate_buffer(device)
+    transfer_stream = torch.cuda.Stream(device)
+    compute_stream = torch.cuda.Stream(device)
+    shared_cache = GenericLRUCache(16, store.expert_bytes, device)
     template = SwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
 
     for li in range(num_layers):
         moe = model.layers[li].mlp
-        pipeline = GenericExpertPipeline(store, template, device, cache_capacity=16)
+        pipeline = GenericExpertPipeline(
+            store, template, device,
+            buf_a=shared_buf_a,
+            buf_b=shared_buf_b,
+            transfer_stream=transfer_stream,
+            compute_stream=compute_stream,
+            cache=shared_cache,
+        )
 
         def make_offloaded(layer_idx, pipe, gate):
             def fwd(hidden_states):

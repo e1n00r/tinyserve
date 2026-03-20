@@ -1,7 +1,8 @@
 import pytest
 import torch
+import torch.nn.functional as F
 
-from src.mxfp4 import dequant_mxfp4
+from src.mxfp4 import dequant_mxfp4, dequant_mxfp4_no_transpose
 
 
 def test_dequant_known_values():
@@ -93,3 +94,30 @@ def test_dequant_matches_hf_reference():
     for i in range(num_experts):
         our_out = dequant_mxfp4(blocks[i], scales[i], dtype=torch.bfloat16)
         torch.testing.assert_close(our_out.to(hf_out.device), hf_out[i], rtol=0, atol=0)
+
+
+def test_mxfp4_linear_matches_reference():
+    """_mxfp4_linear matches dequant_mxfp4_no_transpose + F.linear (all backends)."""
+    import pytest
+    import torch
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    from src.offloaded_model import _mxfp4_linear
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    out_features, groups, B = 64, 4, 16
+    in_features = groups * B * 2  # 128
+
+    blocks = torch.randint(0, 256, (out_features, groups, B), dtype=torch.uint8, device=device)
+    scales = torch.randint(120, 135, (out_features, groups), dtype=torch.uint8, device=device)
+    bias = torch.randn(out_features, dtype=torch.bfloat16, device=device) * 0.01
+    x = torch.randn(1, in_features, dtype=torch.bfloat16, device=device)
+
+    w = dequant_mxfp4_no_transpose(blocks, scales, dtype=torch.bfloat16)
+    ref = F.linear(x, w, bias)
+
+    out = _mxfp4_linear(x, blocks, scales, bias)
+
+    torch.testing.assert_close(out, ref, rtol=0, atol=0.01)

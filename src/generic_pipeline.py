@@ -34,23 +34,23 @@ class GenericExpertPipeline:
         store: GenericExpertStore,
         template: nn.Module,
         device: torch.device,
-        cache_capacity: int = 0,
+        buf_a: GenericExpertBuffer,
+        buf_b: GenericExpertBuffer,
+        transfer_stream: torch.cuda.Stream,
+        compute_stream: torch.cuda.Stream,
+        cache: GenericLRUCache | None = None,
     ):
         self.store = store
         self.template = template
         self.device = device
 
-        self.buf_a = store.allocate_buffer(device)
-        self.buf_b = store.allocate_buffer(device)
+        self.buf_a = buf_a
+        self.buf_b = buf_b
 
-        self.transfer_stream = torch.cuda.Stream(device)
-        self.compute_stream = torch.cuda.Stream(device)
+        self.transfer_stream = transfer_stream
+        self.compute_stream = compute_stream
 
-        self.cache = (
-            GenericLRUCache(cache_capacity, store.expert_bytes, device)
-            if cache_capacity > 0
-            else None
-        )
+        self.cache = cache
 
     def execute_layer_experts(
         self,
