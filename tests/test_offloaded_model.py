@@ -31,7 +31,7 @@ def test_offloaded_model_from_hf_module():
     with torch.no_grad():
         ref_logits = model_gpu(input_ids)
 
-    offloaded = OffloadedModel.from_module(
+    offloaded, store, cap, policy = OffloadedModel.from_module(
         model,
         moe_block_attr="mlp",
         expert_list_attr="experts",
@@ -39,7 +39,9 @@ def test_offloaded_model_from_hf_module():
         top_k=top_k,
         device=device,
         cache_capacity=16,
+        fp8=False,
     )
+    offloaded = offloaded.to(device)
 
     with torch.no_grad():
         offloaded_logits = offloaded(input_ids)
@@ -79,7 +81,7 @@ def test_offloaded_model_generate():
             ref_tokens.append(next_tok.item())
             ids = torch.cat([ids, next_tok], dim=1)
 
-    offloaded = OffloadedModel.from_module(
+    offloaded, store, cap, policy = OffloadedModel.from_module(
         model,
         moe_block_attr="mlp",
         expert_list_attr="experts",
@@ -87,7 +89,9 @@ def test_offloaded_model_generate():
         top_k=top_k,
         device=device,
         cache_capacity=16,
+        fp8=False,
     )
+    offloaded = offloaded.to(device)
 
     with torch.no_grad():
         offloaded_tokens = []
@@ -110,7 +114,7 @@ def test_cache_stats_accessible():
     model = TinyMoEModel(256, 32, 64, 1, 4, 2).to(torch.bfloat16)
     model.eval()
 
-    offloaded = OffloadedModel.from_module(
+    offloaded, store, cap, policy = OffloadedModel.from_module(
         model,
         moe_block_attr="mlp",
         expert_list_attr="experts",
@@ -119,6 +123,7 @@ def test_cache_stats_accessible():
         device=torch.device("cuda"),
         cache_capacity=8,
     )
+    offloaded = offloaded.to(torch.device("cuda"))
 
     input_ids = torch.tensor([[1, 2, 3]], device="cuda")
     with torch.no_grad():

@@ -95,8 +95,40 @@ class GenericExpertBuffer:
         return self.packed[offset:offset + nbytes].view(dtype).view(shape)
 
 
+def _fp8_layout(bf16_layout: "TensorLayout") -> "TensorLayout":
+    """Return a layout where float tensors are stored as float8_e4m3fn (1 byte/elem)."""
+    fp8_specs = {}
+    for name, (shape, dtype) in bf16_layout.specs.items():
+        if dtype.is_floating_point:
+            fp8_specs[name] = (shape, torch.float8_e4m3fn)
+        else:
+            fp8_specs[name] = (shape, dtype)
+    return TensorLayout(fp8_specs)
+
+
+def _quantize_to_fp8(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Quantize float tensors to float8_e4m3fn; leave uint8 tensors unchanged."""
+    out = {}
+    for name, t in tensors.items():
+        if t.dtype.is_floating_point:
+            out[name] = t.to(torch.float8_e4m3fn)
+        else:
+            out[name] = t
+    return out
+
+
 class GenericExpertStore:
-    """Stores all expert weights on CPU as flat byte buffers."""
+    """Stores all expert weights on CPU as flat byte buffers.
+
+    When ``fp8=True``, floating-point weights are compressed to float8_e4m3fn
+    before storage (~2x smaller than BF16).  GPU buffers always hold BF16 so
+    the template forward is unaffected; ``copy_to_buffer`` dequantises on the
+    fly during the H2D transfer.
+
+    Attributes:
+        expert_bytes: bytes per expert *in CPU storage* (FP8 or BF16).
+        buffer_expert_bytes: bytes per expert *for GPU buffer/cache* (always BF16).
+    """
 
     def __init__(
         self,
@@ -104,12 +136,16 @@ class GenericExpertStore:
         layout: TensorLayout,
         num_layers: int,
         num_experts: int,
+        bf16_layout: "TensorLayout | None" = None,
     ):
         self._data = data
         self.layout = layout
         self.num_layers = num_layers
         self.num_experts = num_experts
         self.expert_bytes = layout.total_bytes
+        # GPU buffers always need BF16-sized slots.
+        self._bf16_layout = bf16_layout if bf16_layout is not None else layout
+        self.buffer_expert_bytes = self._bf16_layout.total_bytes
 
     @classmethod
     def from_dict(
@@ -117,20 +153,24 @@ class GenericExpertStore:
         expert_weights: dict[tuple[int, int], dict[str, torch.Tensor]],
         num_layers: int,
         num_experts: int,
+        fp8: bool = False,
     ) -> "GenericExpertStore":
         sample_key = next(iter(expert_weights))
-        layout = TensorLayout.from_tensors(expert_weights[sample_key])
+        bf16_layout = TensorLayout.from_tensors(expert_weights[sample_key])
+        store_layout = _fp8_layout(bf16_layout) if fp8 else bf16_layout
 
-        data = torch.empty(num_layers, num_experts, layout.total_bytes, dtype=torch.uint8)
+        data = torch.empty(num_layers, num_experts, store_layout.total_bytes, dtype=torch.uint8)
 
         for (layer_idx, expert_idx), tensors in expert_weights.items():
+            packed = _quantize_to_fp8(tensors) if fp8 else tensors
             offset = 0
-            for name, tensor in tensors.items():
+            for name, tensor in packed.items():
                 raw = tensor.contiguous().view(-1).view(torch.uint8)
                 data[layer_idx, expert_idx, offset:offset + raw.numel()] = raw
                 offset += raw.numel()
 
-        return cls(data, layout, num_layers, num_experts)
+        return cls(data, store_layout, num_layers, num_experts,
+                   bf16_layout=bf16_layout if fp8 else None)
 
     @classmethod
     def build(
@@ -138,6 +178,7 @@ class GenericExpertStore:
         moe_layers: list,
         moe_block_attr: str,
         expert_list_attr: str,
+        fp8: bool = False,
     ) -> tuple["GenericExpertStore", int]:
         import torch.nn as nn
 
@@ -153,12 +194,13 @@ class GenericExpertStore:
             for n, p in first_container.named_parameters():
                 sample_tensors.update(_expand_param(n, p, expert_idx=0))
 
-        layout = TensorLayout.from_tensors(sample_tensors)
+        bf16_layout = TensorLayout.from_tensors(sample_tensors)
+        store_layout = _fp8_layout(bf16_layout) if fp8 else bf16_layout
         num_layers = len(moe_layers)
 
         tmp = tempfile.NamedTemporaryFile(suffix=".expert_store", delete=False)
         mmap = np.memmap(tmp.name, dtype=np.uint8, mode="w+",
-                         shape=(num_layers, num_experts, layout.total_bytes))
+                         shape=(num_layers, num_experts, store_layout.total_bytes))
         data = torch.from_numpy(mmap)
 
         for store_idx, (_, layer) in enumerate(moe_layers):
@@ -168,7 +210,9 @@ class GenericExpertStore:
                     tensors: dict[str, torch.Tensor] = {}
                     for n, p in expert.named_parameters():
                         tensors.update(_expand_param(n, p))
-                    _pack_tensors(data[store_idx, expert_idx], layout, tensors)
+                    if fp8:
+                        tensors = _quantize_to_fp8(tensors)
+                    _pack_tensors(data[store_idx, expert_idx], store_layout, tensors)
                 for param in container.parameters():
                     param.data = torch.empty(0, device="cpu")
             else:
@@ -176,12 +220,15 @@ class GenericExpertStore:
                     tensors = {}
                     for n, p in container.named_parameters():
                         tensors.update(_expand_param(n, p, expert_idx=expert_idx))
-                    _pack_tensors(data[store_idx, expert_idx], layout, tensors)
+                    if fp8:
+                        tensors = _quantize_to_fp8(tensors)
+                    _pack_tensors(data[store_idx, expert_idx], store_layout, tensors)
                 for param in container.parameters():
                     param.data = torch.empty(0, device="cpu")
             gc.collect()
 
-        store = cls(data, layout, num_layers, num_experts)
+        store = cls(data, store_layout, num_layers, num_experts,
+                    bf16_layout=bf16_layout if fp8 else None)
         store._mmap = mmap
         return store, num_experts
 
@@ -277,17 +324,45 @@ class GenericExpertStore:
         store._mmap = mmap
         return store, num_experts
 
-    def allocate_buffer(self, device: torch.device) -> GenericExpertBuffer:
-        return GenericExpertBuffer(self.layout, device)
+    @property
+    def _fp8(self) -> bool:
+        return self._bf16_layout is not self.layout
+
+    def allocate_buffer(self, device: torch.device) -> "GenericExpertBuffer":
+        return GenericExpertBuffer(self._bf16_layout, device)
 
     def copy_to_buffer(
         self,
-        buf: GenericExpertBuffer,
+        buf: "GenericExpertBuffer",
         layer_idx: int,
         expert_idx: int,
         non_blocking: bool = False,
     ):
-        buf.packed.copy_(self._data[layer_idx, expert_idx], non_blocking=non_blocking)
+        if not self._fp8:
+            buf.packed.copy_(self._data[layer_idx, expert_idx], non_blocking=non_blocking)
+            return
+        # FP8 path: dequant to BF16 on CPU using a per-buffer pinned staging area,
+        # then single bulk H2D.  One staging buffer per GenericExpertBuffer avoids
+        # contention between the two pipeline slots (buf_a / buf_b).
+        if not hasattr(self, "_cpu_bf16_stages"):
+            self._cpu_bf16_stages: dict[int, torch.Tensor] = {}
+        buf_key = id(buf)
+        if buf_key not in self._cpu_bf16_stages:
+            self._cpu_bf16_stages[buf_key] = torch.empty(
+                self.buffer_expert_bytes, dtype=torch.uint8
+            ).pin_memory()
+        cpu_stage = self._cpu_bf16_stages[buf_key]
+        fp8_data = self._data[layer_idx, expert_idx]
+        for name, (bf16_shape, bf16_dtype) in self._bf16_layout.specs.items():
+            fp8_offset = self.layout.offsets[name]
+            fp8_bytes = self.layout.sizes[name]
+            fp8_shape, fp8_dtype = self.layout.specs[name]
+            bf16_offset = self._bf16_layout.offsets[name]
+            bf16_bytes = self._bf16_layout.sizes[name]
+            src = fp8_data[fp8_offset:fp8_offset + fp8_bytes].view(fp8_dtype).view(fp8_shape)
+            dst = cpu_stage[bf16_offset:bf16_offset + bf16_bytes].view(bf16_dtype).view(bf16_shape)
+            dst.copy_(src)  # CPU: FP8→BF16 dtype cast
+        buf.packed.copy_(cpu_stage, non_blocking=non_blocking)
 
     def prefetch(self, layer_idx: int, expert_idx: int):
         pass

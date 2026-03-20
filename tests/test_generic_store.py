@@ -179,3 +179,60 @@ def test_async_copy_with_stream():
         expert_weights[(0, 0)]["w.weight"],
         rtol=0, atol=0,
     )
+
+
+@requires_cuda
+def test_fp8_double_buffer_no_race():
+    """FP8 copy_to_buffer uses per-buffer staging — no race between buf_a and buf_b."""
+    from src.generic_store import GenericExpertStore
+
+    num_layers, num_experts = 1, 4
+    expert_weights = {}
+    for ei in range(num_experts):
+        expert_weights[(0, ei)] = {
+            "w.weight": torch.full((32, 32), float(ei + 1), dtype=torch.bfloat16),
+        }
+
+    store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts, fp8=True)
+    device = torch.device("cuda")
+    buf_a = store.allocate_buffer(device)
+    buf_b = store.allocate_buffer(device)
+
+    transfer_stream = torch.cuda.Stream(device)
+
+    # Simulate double-buffered pipeline: interleave copies to buf_a and buf_b.
+    with torch.cuda.stream(transfer_stream):
+        store.copy_to_buffer(buf_a, 0, 0, non_blocking=True)
+        store.copy_to_buffer(buf_b, 0, 1, non_blocking=True)
+    transfer_stream.synchronize()
+
+    a_val = buf_a.get_tensor("w.weight").float().mean().item()
+    b_val = buf_b.get_tensor("w.weight").float().mean().item()
+
+    assert a_val == pytest.approx(1.0, abs=0.1), f"buf_a got {a_val}, expected 1.0"
+    assert b_val == pytest.approx(2.0, abs=0.1), f"buf_b got {b_val}, expected 2.0"
+
+
+@requires_cuda
+def test_fp8_roundtrip_accuracy():
+    """FP8 compression→decompression preserves values within FP8 quantization error."""
+    from src.generic_store import GenericExpertStore
+
+    expert_weights = {
+        (0, 0): {
+            "gate.weight": torch.randn(64, 32, dtype=torch.bfloat16),
+            "down.weight": torch.randn(32, 64, dtype=torch.bfloat16),
+        },
+    }
+
+    store = GenericExpertStore.from_dict(expert_weights, 1, 1, fp8=True)
+    device = torch.device("cuda")
+    buf = store.allocate_buffer(device)
+
+    store.copy_to_buffer(buf, 0, 0, non_blocking=False)
+    torch.cuda.synchronize()
+
+    for name, original in expert_weights[(0, 0)].items():
+        retrieved = buf.get_tensor(name).cpu()
+        # FP8 e4m3 has ~3 mantissa bits — expect ~10% relative error at most
+        torch.testing.assert_close(retrieved, original, rtol=0.15, atol=0.05)

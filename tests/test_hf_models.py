@@ -24,7 +24,7 @@ def _offload_and_compare(model_cls, config,
     with torch.no_grad():
         ref_logits = ref_model(input_ids).logits
 
-    offloaded = OffloadedModel.from_module(
+    offloaded, *_ = OffloadedModel.from_module(
         model.model,
         moe_block_attr=moe_block_attr,
         expert_list_attr=expert_list_attr,
@@ -54,7 +54,7 @@ def _offload_and_compare(model_cls, config,
 
     ref_model_2 = model_cls(config).to(torch.bfloat16).eval()
     ref_model_2.load_state_dict(ref_model.state_dict())
-    offloaded_2 = OffloadedModel.from_module(
+    offloaded_2, *_ = OffloadedModel.from_module(
         ref_model_2.model,
         moe_block_attr=moe_block_attr,
         expert_list_attr=expert_list_attr,
