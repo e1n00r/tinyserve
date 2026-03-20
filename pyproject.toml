@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gpt-oss-offload"
+name = "tinyserve"
 version = "0.1.0"
-description = "Run GPT-OSS-120B (117B MoE) on a single 8GB GPU at 14 tok/s"
+description = "Run large MoE models exceeding VRAM via expert CPU offloading with GPU cache"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 dependencies = [

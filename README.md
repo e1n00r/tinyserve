@@ -1,4 +1,4 @@
-# moe-offload
+# tinyserve
 
 Run large MoE models on a single consumer GPU by offloading expert weights to CPU RAM.
 
@@ -67,8 +67,8 @@ print(tokenizer.decode(output[0]))
 For GPT-OSS-120B with optimized MXFP4 pipeline:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/moe-offload.git
-cd moe-offload
+git clone https://github.com/e1n00r/tinyserve.git
+cd tinyserve
 pip install -e .
 
 python -m scripts.split_weights --output-dir ./weights
