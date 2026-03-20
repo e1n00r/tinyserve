@@ -1,0 +1,2 @@
+  Cache capacity: 74 experts (3.68 GB GPU)
+{"model": "openai/gpt-oss-20b", "policy": "slru", "tok_s": 1.7, "ms_per_tok": 586.9, "n_warmup": 80, "n_measure": 60, "cache_hits": 14040, "cache_misses": 124200, "cache_hit_rate": 0.1016}

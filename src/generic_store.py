@@ -6,6 +6,7 @@ The buffer layout is computed at init time from actual weight shapes.
 """
 
 import gc
+import os
 import tempfile
 import numpy as np
 import torch
@@ -159,7 +160,8 @@ class GenericExpertStore:
         bf16_layout = TensorLayout.from_tensors(expert_weights[sample_key])
         store_layout = _fp8_layout(bf16_layout) if fp8 else bf16_layout
 
-        data = torch.empty(num_layers, num_experts, store_layout.total_bytes, dtype=torch.uint8)
+        data = torch.empty(num_layers, num_experts, store_layout.total_bytes,
+                           dtype=torch.uint8).pin_memory()
 
         for (layer_idx, expert_idx), tensors in expert_weights.items():
             packed = _quantize_to_fp8(tensors) if fp8 else tensors
@@ -198,8 +200,11 @@ class GenericExpertStore:
         store_layout = _fp8_layout(bf16_layout) if fp8 else bf16_layout
         num_layers = len(moe_layers)
 
+        # Write to mmap first (streaming, avoids holding full tensor in pageable RAM).
         tmp = tempfile.NamedTemporaryFile(suffix=".expert_store", delete=False)
-        mmap = np.memmap(tmp.name, dtype=np.uint8, mode="w+",
+        tmp_name = tmp.name
+        tmp.close()
+        mmap = np.memmap(tmp_name, dtype=np.uint8, mode="w+",
                          shape=(num_layers, num_experts, store_layout.total_bytes))
         data = torch.from_numpy(mmap)
 
@@ -227,9 +232,25 @@ class GenericExpertStore:
                     param.data = torch.empty(0, device="cpu")
             gc.collect()
 
-        store = cls(data, store_layout, num_layers, num_experts,
+        # Flush mmap to ensure all writes are visible, then promote to pinned RAM.
+        # This is the only point where mmap page faults occur; thereafter all
+        # H2D transfers go through pinned DMA with no OS involvement.
+        mmap.flush()
+        pinned = torch.empty(num_layers, num_experts, store_layout.total_bytes,
+                             dtype=torch.uint8).pin_memory()
+        pinned.copy_(data)
+
+        # Release mmap and tempfile — data now lives entirely in pinned RAM.
+        del data
+        del mmap
+        gc.collect()
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+
+        store = cls(pinned, store_layout, num_layers, num_experts,
                     bf16_layout=bf16_layout if fp8 else None)
-        store._mmap = mmap
         return store, num_experts
 
     @classmethod
@@ -308,7 +329,9 @@ class GenericExpertStore:
         num_moe_layers = len(moe_layer_indices)
 
         tmp = tempfile.NamedTemporaryFile(suffix=".expert_store", delete=False)
-        mmap = np.memmap(tmp.name, dtype=np.uint8, mode="w+",
+        tmp_name = tmp.name
+        tmp.close()
+        mmap = np.memmap(tmp_name, dtype=np.uint8, mode="w+",
                          shape=(num_moe_layers, num_experts, layout.total_bytes))
         data = torch.from_numpy(mmap)
 
@@ -320,8 +343,20 @@ class GenericExpertStore:
             del layer_tensors[li]
             gc.collect()
 
-        store = cls(data, layout, num_moe_layers, num_experts)
-        store._mmap = mmap
+        mmap.flush()
+        pinned = torch.empty(num_moe_layers, num_experts, layout.total_bytes,
+                             dtype=torch.uint8).pin_memory()
+        pinned.copy_(data)
+
+        del data
+        del mmap
+        gc.collect()
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+
+        store = cls(pinned, layout, num_moe_layers, num_experts)
         return store, num_experts
 
     @property

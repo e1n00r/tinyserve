@@ -78,6 +78,7 @@ class OffloadedModel(nn.Module):
         first_moe_layer: int = 0,
         model_id: str | None = None,
         cache_policy: str = "lru",
+        fp8: bool = True,
     ) -> "OffloadedModel":
         model.eval()
         layers = model.layers
@@ -113,25 +114,16 @@ class OffloadedModel(nn.Module):
         else:
             # Standard path: extract weights from the model's current parameters.
             template = _make_template(first_container, device)
-            store, _ = GenericExpertStore.build(moe_layers, moe_block_attr, expert_list_attr)
+            store, _ = GenericExpertStore.build(moe_layers, moe_block_attr, expert_list_attr, fp8=fp8)
 
-        free_vram = torch.cuda.mem_get_info(device)[0]
-        reserved = 2 * store.expert_bytes + 512 * 1024 * 1024
-        available_for_cache = max(0, free_vram - reserved)
-        auto_capacity = store.expert_bytes > 0 and available_for_cache // store.expert_bytes or 0
-        if cache_capacity > 0:
-            cache_capacity = min(cache_capacity, auto_capacity)
-
-        shared_buf_a = store.allocate_buffer(device)
+        shared_buf_a = store.allocate_buffer(device)   # always BF16 layout
         shared_buf_b = store.allocate_buffer(device)
         transfer_stream = torch.cuda.Stream(device)
         compute_stream = torch.cuda.Stream(device)
         shared_stream = torch.cuda.Stream(device)
-        from .generic_store import GenericLRUCache
-        cache = GenericLRUCache(cache_capacity, store.expert_bytes, device, policy=cache_policy) if cache_capacity > 0 else None
 
-        print(f"  Cache capacity: {cache_capacity} experts ({cache_capacity * store.expert_bytes / 1e9:.2f} GB GPU)")
-
+        # Cache is attached later (after the full model.to(device) in offload_model)
+        # so that auto-sizing sees the real remaining VRAM. Pipelines start with cache=None.
         pipelines = []
         for store_idx, (li, layer) in enumerate(moe_layers):
             moe_block = getattr(layer, moe_block_attr)
@@ -141,7 +133,7 @@ class OffloadedModel(nn.Module):
                 buf_b=shared_buf_b,
                 transfer_stream=transfer_stream,
                 compute_stream=compute_stream,
-                cache=cache,
+                cache=None,
                 shared_stream=shared_stream,
             )
             pipelines.append(pipeline)
@@ -152,8 +144,7 @@ class OffloadedModel(nn.Module):
                 softmax_order=softmax_order,
             )
 
-        model = model.to(device).to(torch.bfloat16)
-        return cls(model, pipelines)
+        return cls(model, pipelines), store, cache_capacity, cache_policy
 
 
 def _make_template(expert_container, device):

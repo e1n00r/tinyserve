@@ -66,6 +66,7 @@ def run_benchmark(
     no_cache: bool = False,
     cache_capacity: int | None = None,
     cache_policy: str = "lru",
+    fp8: bool = True,
 ) -> dict:
     from transformers import AutoTokenizer
 
@@ -77,6 +78,7 @@ def run_benchmark(
         device="cuda",
         cache_capacity=cap if cap is not None else 0,
         cache_policy=cache_policy,
+        fp8=fp8,
     )
     tok = AutoTokenizer.from_pretrained(model_id)
     input_ids = tok.encode(prompt, return_tensors="pt").to("cuda")
@@ -146,6 +148,8 @@ def main():
     parser.add_argument("--warmup", type=int, default=40)
     parser.add_argument("--measure", type=int, default=60)
     parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument("--no-fp8", action="store_true",
+                        help="Disable FP8 expert compression (default: FP8 on)")
     parser.add_argument("--cache-capacity", type=int, default=None)
     parser.add_argument("--cache-policy", default="lru", choices=list(_POLICIES))
     parser.add_argument("--compare", action="store_true",
@@ -163,7 +167,7 @@ def main():
                 prompt=args.prompt,
                 n_warmup=args.warmup,
                 n_measure=args.measure,
-                no_cache=args.no_cache,
+                no_cache=args.no_cache, fp8=not args.no_fp8,
                 cache_capacity=args.cache_capacity,
                 cache_policy=args.cache_policy,
             )
@@ -188,7 +192,7 @@ def main():
                 prompt=args.prompt,
                 n_warmup=args.warmup,
                 n_measure=args.measure,
-                no_cache=args.no_cache,
+                no_cache=args.no_cache, fp8=not args.no_fp8,
                 cache_capacity=args.cache_capacity,
                 cache_policy=policy,
             )
@@ -219,7 +223,7 @@ def main():
         prompt=args.prompt,
         n_warmup=args.warmup,
         n_measure=args.measure,
-        no_cache=args.no_cache,
+        no_cache=args.no_cache, fp8=not args.no_fp8,
         cache_capacity=args.cache_capacity,
         cache_policy=args.cache_policy,
     )

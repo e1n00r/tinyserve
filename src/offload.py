@@ -31,7 +31,8 @@ def offload_model(
     device: str | torch.device = "cuda",
     cache_capacity: int = 0,
     model_id: str | None = None,
-    cache_policy: str = "lru",
+    cache_policy: str = "lfru",
+    fp8: bool = True,
 ) -> torch.nn.Module:
     """Offload MoE experts from an HF model to CPU with GPU LRU cache.
 
@@ -65,7 +66,7 @@ def offload_model(
 
     inner_model = model.model if hasattr(model, "model") else model
 
-    offloaded = OffloadedModel.from_module(
+    offloaded, store, cache_capacity, cache_policy = OffloadedModel.from_module(
         inner_model,
         moe_block_attr=profile.moe_block_attr,
         expert_list_attr=profile.expert_list_attr,
@@ -78,12 +79,31 @@ def offload_model(
         first_moe_layer=profile.first_moe_layer,
         model_id=model_id,
         cache_policy=cache_policy,
+        fp8=fp8,
     )
 
     if hasattr(model, "model"):
         model.model = offloaded.model
     model._offload_pipelines = offloaded.pipelines
-    model = model.to(device)
+    model = model.to(device).to(torch.bfloat16)
+
+    # Auto-size or cap cache now that all non-expert weights are on GPU.
+    from .generic_store import GenericLRUCache
+    buf_bytes = store.buffer_expert_bytes  # always BF16 size for GPU
+    if buf_bytes > 0:
+        free_vram = torch.cuda.mem_get_info(device)[0]
+        reserved = 2 * buf_bytes + 256 * 1024 * 1024  # double-buf + 256 MB headroom
+        max_capacity = max(0, free_vram - reserved) // buf_bytes
+        if cache_capacity == 0:
+            cache_capacity = max_capacity
+        else:
+            cache_capacity = min(cache_capacity, max_capacity)
+
+    cache = GenericLRUCache(cache_capacity, buf_bytes, device, policy=cache_policy) if cache_capacity > 0 else None
+    print(f"  Cache capacity: {cache_capacity} experts ({cache_capacity * store.expert_bytes / 1e9:.2f} GB GPU)")
+    for p in offloaded.pipelines:
+        p.cache = cache
+
     return model
 
 
@@ -91,9 +111,10 @@ def load_and_offload(
     model_id: str,
     device: str | torch.device = "cuda",
     cache_capacity: int = 0,
-    cache_policy: str = "lru",
+    cache_policy: str = "lfru",
     flash_attention: bool = True,
     torch_dtype=torch.bfloat16,
+    fp8: bool = True,
     **hf_kwargs,
 ) -> torch.nn.Module:
     """Load a HuggingFace MoE model and immediately offload its experts.
@@ -102,7 +123,7 @@ def load_and_offload(
         model_id: HuggingFace repo id or local path
         device: GPU device
         cache_capacity: expert slots in VRAM (0 = auto)
-        cache_policy: 'lru', 'slru', 'lfu', or 'fifo'
+        cache_policy: 'lru', 'slru', 'lfu', 'lfru', or 'fifo'
         flash_attention: use flash_attention_2 if available (default True)
         torch_dtype: weight dtype (default bfloat16)
         **hf_kwargs: passed through to AutoModelForCausalLM.from_pretrained
@@ -119,9 +140,10 @@ def load_and_offload(
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=torch_dtype,
+        dtype=torch_dtype,
         attn_implementation=attn_impl,
+        device_map="cpu",
         **hf_kwargs,
     )
     return offload_model(model, device=device, cache_capacity=cache_capacity,
-                         cache_policy=cache_policy)
+                         cache_policy=cache_policy, fp8=fp8)

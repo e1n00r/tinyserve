@@ -1,0 +1,2 @@
+  Cache capacity: 0 experts (0.00 GB GPU)
+{"model": "openai/gpt-oss-20b", "policy": "slru", "tok_s": 1.55, "ms_per_tok": 646.7, "n_warmup": 80, "n_measure": 60}

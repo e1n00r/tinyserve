@@ -175,14 +175,64 @@ class FIFOPolicy(CachePolicy):
         return len(self._slots)
 
 
+class LFRUPolicy(CachePolicy):
+    """Frequency-Recency hybrid: evict the entry with the lowest freq/age ratio.
+
+    Score = freq / age  (higher = more valuable to keep).
+    Ties broken by recency.  Dominates both pure LRU (does not evict hot entries
+    that were last used 2 tokens ago) and pure LFU (does not keep stale entries
+    from early prefill).
+    """
+
+    def __init__(self) -> None:
+        self._data: dict[tuple, list] = {}  # key -> [slot, freq, clock]
+        self._clock = 0
+
+    def lookup(self, key: tuple) -> int | None:
+        if key not in self._data:
+            return None
+        entry = self._data[key]
+        self._clock += 1
+        entry[1] += 1   # freq
+        entry[2] = self._clock  # last access
+        return entry[0]
+
+    def insert(self, key: tuple, slot: int) -> None:
+        self._clock += 1
+        self._data[key] = [slot, 1, self._clock]
+
+    def select_evict(self) -> tuple[tuple, int]:
+        # Lowest score = freq / (clock - last_access + 1)
+        # Evict entry where score is minimised.
+        best_key = None
+        best_score = float("inf")
+        for k, (slot, freq, last) in self._data.items():
+            age = self._clock - last + 1
+            score = freq / age
+            if score < best_score:
+                best_score = score
+                best_key = k
+        slot = self._data[best_key][0]
+        return best_key, slot
+
+    def remove(self, key: tuple) -> int | None:
+        entry = self._data.pop(key, None)
+        return entry[0] if entry is not None else None
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
 def make_policy(name: str, capacity: int) -> CachePolicy:
-    """Create a policy by name. name: 'lru' | 'slru' | 'lfu' | 'fifo'"""
+    """Create a policy by name. name: 'lru' | 'slru' | 'lfu' | 'lfru' | 'fifo'"""
     if name == "lru":
         return LRUPolicy()
     if name == "slru":
         return SLRUPolicy(capacity)
     if name == "lfu":
         return LFUPolicy()
+    if name == "lfru":
+        return LFRUPolicy()
     if name == "fifo":
         return FIFOPolicy()
-    raise ValueError(f"Unknown cache policy: {name!r}. Choose from 'lru', 'slru', 'lfu', 'fifo'.")
+    raise ValueError(f"Unknown cache policy: {name!r}. Choose from 'lru', 'slru', 'lfu', 'lfru', 'fifo'.")
