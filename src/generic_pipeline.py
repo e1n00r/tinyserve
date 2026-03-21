@@ -211,7 +211,7 @@ class GenericExpertPipeline:
                 expert_output,
                 tok,
                 layer_idx,
-                expert_indices[tok].tolist(),
+                expert_indices[tok],
                 routing_weights[tok],
             )
         return expert_output
@@ -222,31 +222,57 @@ class GenericExpertPipeline:
         output: torch.Tensor,
         tok_idx: int,
         layer_idx: int,
-        expert_ids: list[int],
+        expert_ids: torch.Tensor | list[int],
         weights: torch.Tensor,
     ):
         if self.cache is None:
+            if isinstance(expert_ids, torch.Tensor):
+                expert_ids = expert_ids.tolist()
             self._pipeline_experts(h, output, tok_idx, layer_idx, expert_ids, weights,
                                    list(range(len(expert_ids))))
-            # Fix B: GPU-side inter-stream sync — CPU thread free to continue.
             _evt = torch.cuda.Event()
             _evt.record(self.compute_stream)
             torch.cuda.current_stream().wait_event(_evt)
             return
 
         cache = self.cache
-        hits: list[tuple[int, int]] = []
-        misses: list[int] = []
         _prof = self.profiler
-        with (_prof.phase("cache_lookup") if _prof else _null_ctx()):
-            for i, eid in enumerate(expert_ids):
-                slot = cache.lookup(layer_idx, eid)
-                if slot is not None:
+        _inline = self._inline_fwd
+
+        # GPU slot map lookup — no CUDA sync.
+        if isinstance(expert_ids, torch.Tensor) and hasattr(cache, 'lookup_slots'):
+            with (_prof.phase("cache_lookup") if _prof else _null_ctx()):
+                slots = cache.lookup_slots(layer_idx, expert_ids)
+                # ONE .tolist() for both slots and expert_ids — single CUDA sync.
+                slots_list = slots.tolist()
+
+            hits = []
+            misses = []
+            expert_ids_list = expert_ids.tolist()  # piggybacks on same sync
+            for i, (eid, slot) in enumerate(zip(expert_ids_list, slots_list)):
+                if slot >= 0:
                     hits.append((i, slot))
+                    # Update policy recency (Python-only, no GPU sync).
+                    cache._policy.lookup((layer_idx, eid))
+                    cache.hits += 1
                 else:
                     misses.append(i)
+                    cache.misses += 1
+        else:
+            # Fallback: original Python path for list inputs or old-style cache.
+            if isinstance(expert_ids, torch.Tensor):
+                expert_ids = expert_ids.tolist()
+            expert_ids_list = expert_ids
+            hits = []
+            misses = []
+            with (_prof.phase("cache_lookup") if _prof else _null_ctx()):
+                for i, eid in enumerate(expert_ids_list):
+                    slot = cache.lookup(layer_idx, eid)
+                    if slot is not None:
+                        hits.append((i, slot))
+                    else:
+                        misses.append(i)
 
-        _inline = self._inline_fwd
         for i, slot in hits:
             with (_prof.phase("hit_compute") if _prof else _null_ctx()):
                 if slot in self._prefetch_events:
@@ -261,7 +287,7 @@ class GenericExpertPipeline:
         if not misses:
             return
 
-        self._pipeline_experts(h, output, tok_idx, layer_idx, expert_ids, weights, misses)
+        self._pipeline_experts(h, output, tok_idx, layer_idx, expert_ids_list, weights, misses)
         _evt = torch.cuda.Event()
         _evt.record(self.compute_stream)
         torch.cuda.current_stream().wait_event(_evt)

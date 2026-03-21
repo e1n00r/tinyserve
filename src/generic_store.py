@@ -423,7 +423,8 @@ class GenericExpertStore:
 class GenericLRUCache:
     """LRU cache for generic expert buffers in GPU VRAM."""
 
-    def __init__(self, capacity: int, expert_bytes: int, device: torch.device, policy: str = "lru"):
+    def __init__(self, capacity: int, expert_bytes: int, device: torch.device,
+                 policy: str = "lru", num_layers: int = 1, num_experts: int = 1):
         self.capacity = capacity
         self.expert_bytes = expert_bytes
         self.device = device
@@ -432,6 +433,16 @@ class GenericLRUCache:
         self._free_slots = list(range(capacity - 1, -1, -1))
         self.hits = 0
         self.misses = 0
+        # GPU-resident slot map: [num_layers, num_experts] → cache slot index.
+        # -1 = not cached. Updated on allocate/evict (miss path only).
+        # Queried via tensor indexing — no CUDA sync needed.
+        # Lazily sized on first allocate if num_layers/num_experts are defaults.
+        self._slot_map: torch.Tensor | None = None
+        self._slot_map_dims = (num_layers, num_experts)
+        if num_layers > 1 or num_experts > 1:
+            self._slot_map = torch.full(
+                (num_layers, num_experts), -1, dtype=torch.int32, device=device
+            )
 
     def lookup(self, layer_idx: int, expert_idx: int) -> int | None:
         slot = self._policy.lookup((layer_idx, expert_idx))
@@ -455,6 +466,23 @@ class GenericLRUCache:
         if hasattr(self._policy, "begin_pass"):
             self._policy.begin_pass()
 
+    def _ensure_slot_map(self, layer_idx: int, expert_idx: int):
+        """Lazily create or grow the slot map to fit (layer_idx, expert_idx)."""
+        nl = max(self._slot_map_dims[0], layer_idx + 1)
+        ne = max(self._slot_map_dims[1], expert_idx + 1)
+        if self._slot_map is None:
+            self._slot_map = torch.full(
+                (nl, ne), -1, dtype=torch.int32, device=self.device
+            )
+            self._slot_map_dims = (nl, ne)
+        elif nl > self._slot_map.shape[0] or ne > self._slot_map.shape[1]:
+            new_map = torch.full(
+                (nl, ne), -1, dtype=torch.int32, device=self.device
+            )
+            new_map[:self._slot_map.shape[0], :self._slot_map.shape[1]] = self._slot_map
+            self._slot_map = new_map
+            self._slot_map_dims = (nl, ne)
+
     def allocate(self, layer_idx: int, expert_idx: int) -> int:
         key = (layer_idx, expert_idx)
         if self._free_slots:
@@ -462,8 +490,39 @@ class GenericLRUCache:
         else:
             evict_key, slot = self._policy.select_evict()
             self._policy.remove(evict_key)
+            if self._slot_map is not None:
+                self._slot_map[evict_key[0], evict_key[1]] = -1
         self._policy.insert(key, slot)
+        self._ensure_slot_map(layer_idx, expert_idx)
+        self._slot_map[layer_idx, expert_idx] = slot
         return slot
+
+    def lookup_slots(self, layer_idx: int, expert_ids: torch.Tensor) -> torch.Tensor:
+        """GPU tensor cache lookup — no CUDA sync.
+
+        Args:
+            layer_idx: which MoE layer
+            expert_ids: [top_k] int tensor on GPU
+
+        Returns:
+            [top_k] int32 tensor on GPU. Values >= 0 are cache slot indices,
+            -1 means cache miss.
+        """
+        if self._slot_map is None:
+            return torch.full_like(expert_ids, -1, dtype=torch.int32)
+        if layer_idx >= self._slot_map.shape[0]:
+            return torch.full_like(expert_ids, -1, dtype=torch.int32)
+        # Clamp expert_ids to valid range — OOB indices get -1 (miss).
+        ne = self._slot_map.shape[1]
+        ids = expert_ids.long().to(self.device)
+        safe = ids.clamp(max=ne - 1)
+        result = self._slot_map[layer_idx, safe]
+        # Mark any clamped (OOB) indices as misses.
+        oob_mask = ids >= ne
+        if oob_mask.any():
+            result = result.clone()
+            result[oob_mask] = -1
+        return result
 
     def store_from_buffer(self, slot: int, buf: GenericExpertBuffer):
         self._packed[slot].copy_(buf.packed)

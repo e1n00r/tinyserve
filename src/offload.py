@@ -102,7 +102,10 @@ def offload_model(
         else:
             cache_capacity = min(cache_capacity, max_capacity)
 
-    cache = GenericLRUCache(cache_capacity, buf_bytes, device, policy=cache_policy) if cache_capacity > 0 else None
+    cache = GenericLRUCache(
+        cache_capacity, buf_bytes, device, policy=cache_policy,
+        num_layers=store.num_layers, num_experts=store.num_experts,
+    ) if cache_capacity > 0 else None
     print(f"  Cache capacity: {cache_capacity} experts ({cache_capacity * buf_bytes / 1e9:.2f} GB GPU)")
     for p in offloaded.pipelines:
         p.cache = cache
