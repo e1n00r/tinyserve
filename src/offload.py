@@ -89,6 +89,8 @@ def offload_model(
     fp8: bool = True,
     cache_bias: float = 0.0,
     adaptive_fate: bool = True,
+    max_seq_len: int = 0,
+    kv_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.nn.Module:
     """Offload MoE experts from an HF model to CPU with GPU LRU cache.
 
@@ -144,13 +146,25 @@ def offload_model(
     model._offload_pipelines = offloaded.pipelines
     model = model.to(device).to(torch.bfloat16)
 
-    # Auto-size or cap cache now that all non-expert weights are on GPU.
+    # Allocate KV cache first (if requested), then give remainder to expert cache.
     from .generic_store import GenericLRUCache
-    buf_bytes = store.buffer_expert_bytes  # always BF16 size for GPU
+    from .static_kv_cache import StaticKVCache
+    buf_bytes = store.buffer_expert_bytes
+    free_vram = torch.cuda.mem_get_info(device)[0]
+    reserved = 2 * buf_bytes + 256 * 1024 * 1024  # double-buf + 256 MB headroom
+
+    kv_cache = None
+    kv_vram = 0
+    if max_seq_len > 0:
+        kv_cache = StaticKVCache.from_model_config(
+            config, max_seq_len=max_seq_len, device=device, dtype=kv_dtype
+        )
+        kv_vram = kv_cache.vram_bytes
+        model._kv_cache = kv_cache
+
     if buf_bytes > 0:
-        free_vram = torch.cuda.mem_get_info(device)[0]
-        reserved = 2 * buf_bytes + 256 * 1024 * 1024  # double-buf + 256 MB headroom
-        max_capacity = max(0, free_vram - reserved) // buf_bytes
+        available = max(0, free_vram - reserved - kv_vram)
+        max_capacity = available // buf_bytes
         if cache_capacity == 0:
             cache_capacity = max_capacity
         else:
@@ -160,7 +174,9 @@ def offload_model(
         cache_capacity, buf_bytes, device, policy=cache_policy,
         num_layers=store.num_layers, num_experts=store.num_experts,
     ) if cache_capacity > 0 else None
-    print(f"  Cache capacity: {cache_capacity} experts ({cache_capacity * buf_bytes / 1e9:.2f} GB GPU)")
+    if kv_cache is not None:
+        print(f"  KV cache: {max_seq_len} tokens ({kv_vram / 1e9:.2f} GB, {kv_dtype})")
+    print(f"  Expert cache: {cache_capacity} experts ({cache_capacity * buf_bytes / 1e9:.2f} GB GPU)")
     for p in offloaded.pipelines:
         p.cache = cache
         p.cache_bias = cache_bias
@@ -179,6 +195,8 @@ def load_and_offload(
     fp8: bool = True,
     adaptive_fate: bool = True,
     attn_implementation: str | None = None,
+    max_seq_len: int = 0,
+    kv_dtype: torch.dtype = torch.bfloat16,
     **hf_kwargs,
 ) -> torch.nn.Module:
     """Load a HuggingFace MoE model and immediately offload its experts.
@@ -219,4 +237,5 @@ def load_and_offload(
     )
     return offload_model(model, device=device, cache_capacity=cache_capacity,
                          model_id=model_id, cache_policy=cache_policy, fp8=fp8,
-                         cache_bias=cache_bias, adaptive_fate=adaptive_fate)
+                         cache_bias=cache_bias, adaptive_fate=adaptive_fate,
+                         max_seq_len=max_seq_len, kv_dtype=kv_dtype)
