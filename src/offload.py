@@ -29,7 +29,7 @@ def _register_flex_attention() -> str:
         from torch.nn.attention.flex_attention import flex_attention
         import transformers
 
-        _compiled_flex = torch.compile(flex_attention)
+        _compiled_flex = torch.compile(flex_attention, dynamic=True)
 
         def flex_attention_with_sinks(
             module, query, key, value, attention_mask, scaling, dropout=0., **_
@@ -206,6 +206,9 @@ def load_and_offload(
                 attn_impl = "flash_attention_2"
             except ImportError:
                 pass
+                # FlexAttention requires static KV cache for efficient compilation.
+                # Enable via load_and_offload(attn_implementation='flex') when
+                # static KV cache is implemented.
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
