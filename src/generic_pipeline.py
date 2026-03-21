@@ -7,7 +7,15 @@ template module, calls forward(), accumulates weighted outputs.
 import torch
 import torch.nn as nn
 
+import contextlib
+
 from .generic_store import GenericExpertBuffer, GenericExpertStore, GenericLRUCache
+from .profiler import OffloadProfiler
+
+
+@contextlib.contextmanager
+def _null_ctx():
+    yield
 
 
 def swap_weights_and_forward(
@@ -24,6 +32,209 @@ def swap_weights_and_forward(
                 mod = getattr(mod, part)
             getattr(mod, parts[-1]).copy_(buf.get_tensor(name))
     return template(hidden_states)
+
+
+def _precompute_param_refs(
+    template: nn.Module,
+    layout: "TensorLayout",
+) -> list[tuple[nn.Parameter, int, int, tuple[int, ...], torch.dtype]]:
+    """Precompute parameter references + offsets to avoid repeated string ops."""
+    refs = []
+    for name, (shape, dtype) in layout.specs.items():
+        parts = name.split(".")
+        mod = template
+        for part in parts[:-1]:
+            mod = getattr(mod, part)
+        param = getattr(mod, parts[-1])
+        offset = layout.offsets[name]
+        nbytes = layout.sizes[name]
+        refs.append((param, offset, nbytes, shape, dtype))
+    return refs
+
+
+def forward_from_packed(
+    template: nn.Module,
+    packed: torch.Tensor,
+    param_refs: list,
+    hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    """Set template params to views of packed tensor — zero copy — then forward."""
+    with torch.no_grad():
+        for param, offset, nbytes, shape, dtype in param_refs:
+            param.data = packed[offset:offset + nbytes].view(dtype).view(shape)
+    return template(hidden_states)
+
+
+def _build_inline_forward(layout, act_fn):
+    """Build an inlined expert forward function with baked-in offsets.
+
+    Eliminates per-call: dict comprehension, getattr loop, shape checks.
+    Returns a function: (packed, hidden) -> output.
+    """
+    specs = layout.specs
+
+    if "gate_up_proj" not in specs or "down_proj" not in specs:
+        return None
+
+    gu_off = layout.offsets["gate_up_proj"]
+    gu_sz = layout.sizes["gate_up_proj"]
+    gu_shape, gu_dtype = specs["gate_up_proj"]
+    dn_off = layout.offsets["down_proj"]
+    dn_sz = layout.sizes["down_proj"]
+    dn_shape, dn_dtype = specs["down_proj"]
+    # Pre-decide transpose. The template forward checks:
+    # if w.shape[0] == hidden_dim: w = w.t() before passing to F.linear.
+    # F.linear(x, w) does x @ w.T. So we need w in [out, in] for F.linear.
+    # After the template's transpose, it passes to F.linear, so effectively:
+    #   stored as [in, out] → t() → [out, in] → F.linear does x @ [out,in].T = x @ [in,out]
+    # This means: if shape[0] == gu_shape's in_features (hidden_dim), do t() then F.linear.
+    # Simpler: just replicate the template's check exactly.
+    # For gate_up: if shape[0] == hidden_dim → transpose before F.linear
+    # hidden_dim = gu_shape[0] if gu_shape[0] < gu_shape[1] else gu_shape[1]
+    # (gate_up_proj maps hidden → 2*intermediate, so hidden is the smaller dim)
+    hidden_dim = min(gu_shape)
+    gu_needs_t = (gu_shape[0] == hidden_dim)
+    # For down_proj: maps intermediate → hidden, so intermediate is input
+    # The template checks: if w.shape[0] == gated.shape[-1] (intermediate_dim)
+    intermediate_dim = hidden_dim  # for gpt-oss: hidden==intermediate, but check from gate_up
+    # Actually intermediate = max(gu_shape) // 2 for interleaved, or just check dn_shape
+    # The template does: if w_dn.shape[0] == gated.shape[-1]. gated = intermediate_size.
+    # For gate_up: output is 2*intermediate. After SwiGLU: intermediate.
+    # So gated_dim = max(gu_shape) // 2 (chunk) or max(gu_shape) // 2 (interleaved)
+    if act_fn is not None:
+        gated_dim = max(gu_shape) // 2  # chunk splits in half
+    else:
+        gated_dim = max(gu_shape) // 2  # interleaved [::2] also halves
+    dn_needs_t = (dn_shape[0] == gated_dim)
+
+    has_bias = "gate_up_proj_bias" in specs
+    if has_bias:
+        gub_off = layout.offsets["gate_up_proj_bias"]
+        gub_sz = layout.sizes["gate_up_proj_bias"]
+        gub_shape, gub_dtype = specs["gate_up_proj_bias"]
+        dnb_off = layout.offsets["down_proj_bias"]
+        dnb_sz = layout.sizes["down_proj_bias"]
+        dnb_shape, dnb_dtype = specs["down_proj_bias"]
+
+    linear = nn.functional.linear
+
+    if act_fn is not None:
+        # Standard SiLU/GELU gate
+        def _forward(packed, h):
+            w_gu = packed[gu_off:gu_off + gu_sz].view(gu_dtype).view(gu_shape)
+            if gu_needs_t:
+                w_gu = w_gu.t()
+            b_gu = packed[gub_off:gub_off + gub_sz].view(gub_dtype).view(gub_shape) if has_bias else None
+            gate_up = linear(h, w_gu, b_gu)
+            gate, up = gate_up.chunk(2, dim=-1)
+            gated = act_fn(gate) * up
+            w_dn = packed[dn_off:dn_off + dn_sz].view(dn_dtype).view(dn_shape)
+            if dn_needs_t:
+                w_dn = w_dn.t()
+            b_dn = packed[dnb_off:dnb_off + dnb_sz].view(dnb_dtype).view(dnb_shape) if has_bias else None
+            return linear(gated, w_dn, b_dn)
+    else:
+        # GPT-OSS custom SwiGLU
+        def _forward(packed, h):
+            w_gu = packed[gu_off:gu_off + gu_sz].view(gu_dtype).view(gu_shape)
+            if gu_needs_t:
+                w_gu = w_gu.t()
+            b_gu = packed[gub_off:gub_off + gub_sz].view(gub_dtype).view(gub_shape) if has_bias else None
+            gate_up = linear(h, w_gu, b_gu)
+            gate = gate_up[..., ::2].clamp(max=7.0)
+            up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
+            gated = (up + 1) * gate * torch.sigmoid(gate * 1.702)
+            w_dn = packed[dn_off:dn_off + dn_sz].view(dn_dtype).view(dn_shape)
+            if dn_needs_t:
+                w_dn = w_dn.t()
+            b_dn = packed[dnb_off:dnb_off + dnb_sz].view(dnb_dtype).view(dnb_shape) if has_bias else None
+            return linear(gated, w_dn, b_dn)
+
+    return _forward
+
+
+def _batched_expert_forward(
+    cache: "GenericLRUCache",
+    layout: "TensorLayout",
+    hidden: torch.Tensor,
+    hits: list[tuple[int, int]],
+    weights: torch.Tensor,
+    prefetch_events: dict,
+    act_fn=None,
+) -> torch.Tensor:
+    """Process all cache-hit experts in one shot via batched matmul.
+
+    Instead of N sequential forward calls, gathers weight views and does
+    2 batched matmuls (gate_up + down). Eliminates per-expert Python dispatch.
+    """
+    n = len(hits)
+    if n == 0:
+        return torch.zeros_like(hidden)
+
+    specs = layout.specs
+    gu_off = layout.offsets["gate_up_proj"]
+    gu_sz = layout.sizes["gate_up_proj"]
+    gu_shape, gu_dtype = specs["gate_up_proj"]
+    dn_off = layout.offsets["down_proj"]
+    dn_sz = layout.sizes["down_proj"]
+    dn_shape, dn_dtype = specs["down_proj"]
+
+    has_bias = "gate_up_proj_bias" in specs
+    if has_bias:
+        gub_off = layout.offsets["gate_up_proj_bias"]
+        gub_sz = layout.sizes["gate_up_proj_bias"]
+        gub_shape, gub_dtype = specs["gate_up_proj_bias"]
+        dnb_off = layout.offsets["down_proj_bias"]
+        dnb_sz = layout.sizes["down_proj_bias"]
+        dnb_shape, dnb_dtype = specs["down_proj_bias"]
+
+    gu_list = []
+    dn_list = []
+    gub_list = []
+    dnb_list = []
+    w_list = []
+    for i, slot in hits:
+        if slot in prefetch_events:
+            torch.cuda.current_stream().wait_event(prefetch_events.pop(slot))
+        packed = cache.get_packed(slot)
+        gu_list.append(packed[gu_off:gu_off + gu_sz].view(gu_dtype).view(gu_shape))
+        dn_list.append(packed[dn_off:dn_off + dn_sz].view(dn_dtype).view(dn_shape))
+        if has_bias:
+            gub_list.append(packed[gub_off:gub_off + gub_sz].view(gub_dtype).view(gub_shape))
+            dnb_list.append(packed[dnb_off:dnb_off + dnb_sz].view(dnb_dtype).view(dnb_shape))
+        w_list.append(weights[i])
+
+    gu_w = torch.stack(gu_list)
+    dn_w = torch.stack(dn_list)
+    h = hidden.unsqueeze(0).expand(n, -1, -1)
+
+    if gu_w.shape[1] == hidden.shape[-1]:
+        gate_up = torch.bmm(h, gu_w)
+    else:
+        gate_up = torch.bmm(h, gu_w.transpose(1, 2))
+
+    if has_bias:
+        gate_up = gate_up + torch.stack(gub_list).unsqueeze(1)
+
+    # Activation: SiLU/SwiGLU depending on model
+    if act_fn is not None:
+        gate, up = gate_up.chunk(2, dim=-1)
+        gated = act_fn(gate) * up
+    else:
+        gate = gate_up[..., ::2].clamp(max=7.0)
+        up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
+        gated = (up + 1) * gate * torch.sigmoid(gate * 1.702)
+
+    if dn_w.shape[1] == gated.shape[-1]:
+        out = torch.bmm(gated, dn_w)
+    else:
+        out = torch.bmm(gated, dn_w.transpose(1, 2))
+
+    if has_bias:
+        out = out + torch.stack(dnb_list).unsqueeze(1)
+
+    w_t = torch.stack(w_list).view(n, 1, 1)
+    return (out * w_t).sum(0)
 
 
 class GenericExpertPipeline:
@@ -53,6 +264,13 @@ class GenericExpertPipeline:
 
         self.cache = cache
         self.cache_bias: float = 0.0  # logit bias magnitude for cache-aware routing (I4)
+        self.profiler: OffloadProfiler | None = None
+        # Precomputed param refs for zero-copy forward from cache slots.
+        bf16_layout = store._bf16_layout if store._fp8 else store.layout
+        self._param_refs = _precompute_param_refs(template, bf16_layout)
+        self._act_fn = getattr(template, '_act_fn', None)
+        # Inlined forward: baked-in offsets, no dict/getattr per call.
+        self._inline_fwd = _build_inline_forward(bf16_layout, self._act_fn)
         self.shared_stream = shared_stream if shared_stream is not None else torch.cuda.Stream(device)
         self._prefetch_stream = torch.cuda.Stream(device)
         self._prefetch_events: dict[int, torch.cuda.Event] = {}  # slot -> H2D-complete event
@@ -101,20 +319,26 @@ class GenericExpertPipeline:
         cache = self.cache
         hits: list[tuple[int, int]] = []
         misses: list[int] = []
-        for i, eid in enumerate(expert_ids):
-            slot = cache.lookup(layer_idx, eid)
-            if slot is not None:
-                hits.append((i, slot))
-            else:
-                misses.append(i)
+        _prof = self.profiler
+        with (_prof.phase("cache_lookup") if _prof else _null_ctx()):
+            for i, eid in enumerate(expert_ids):
+                slot = cache.lookup(layer_idx, eid)
+                if slot is not None:
+                    hits.append((i, slot))
+                else:
+                    misses.append(i)
 
+        _inline = self._inline_fwd
         for i, slot in hits:
-            if slot in self._prefetch_events:
-                # Prefetch H2D may still be in flight — sync before reading the cache slot.
-                torch.cuda.current_stream().wait_event(self._prefetch_events.pop(slot))
-            cache.load_to_buffer(slot, self.buf_a)
-            out = swap_weights_and_forward(self.template, self.buf_a, h)
-            output[tok_idx] += weights[i] * out.squeeze(0)
+            with (_prof.phase("hit_compute") if _prof else _null_ctx()):
+                if slot in self._prefetch_events:
+                    torch.cuda.current_stream().wait_event(self._prefetch_events.pop(slot))
+                packed = cache.get_packed(slot)
+                if _inline is not None:
+                    out = _inline(packed, h)
+                else:
+                    out = forward_from_packed(self.template, packed, self._param_refs, h)
+                output[tok_idx] += weights[i] * out.squeeze(0)
 
         if not misses:
             return
@@ -137,13 +361,15 @@ class GenericExpertPipeline:
         bufs = [self.buf_a, self.buf_b]
         cache = self.cache
         buf_done: list[torch.cuda.Event | None] = [None, None]
+        _prof = self.profiler
 
         load_done = torch.cuda.Event()
-        with torch.cuda.stream(self.transfer_stream):
-            self.store.copy_to_buffer(
-                bufs[0], layer_idx, expert_ids[indices[0]], non_blocking=True
-            )
-            load_done.record(self.transfer_stream)
+        with (_prof.phase("h2d_transfer") if _prof else _null_ctx()):
+            with torch.cuda.stream(self.transfer_stream):
+                self.store.copy_to_buffer(
+                    bufs[0], layer_idx, expert_ids[indices[0]], non_blocking=True
+                )
+                load_done.record(self.transfer_stream)
 
         for mi in range(len(indices)):
             buf_idx = mi & 1
@@ -156,22 +382,26 @@ class GenericExpertPipeline:
             if mi < len(indices) - 1:
                 next_buf_idx = 1 - buf_idx
                 load_done = torch.cuda.Event()
-                with torch.cuda.stream(self.transfer_stream):
-                    if buf_done[next_buf_idx] is not None:
-                        self.transfer_stream.wait_event(buf_done[next_buf_idx])
-                    self.store.copy_to_buffer(
-                        bufs[next_buf_idx], layer_idx,
-                        expert_ids[indices[mi + 1]], non_blocking=True,
-                    )
-                    load_done.record(self.transfer_stream)
+                with (_prof.phase("h2d_transfer") if _prof else _null_ctx()):
+                    with torch.cuda.stream(self.transfer_stream):
+                        if buf_done[next_buf_idx] is not None:
+                            self.transfer_stream.wait_event(buf_done[next_buf_idx])
+                        self.store.copy_to_buffer(
+                            bufs[next_buf_idx], layer_idx,
+                            expert_ids[indices[mi + 1]], non_blocking=True,
+                        )
+                        load_done.record(self.transfer_stream)
+
+            with (_prof.phase("gpu_compute") if _prof else _null_ctx()):
+                with torch.cuda.stream(self.compute_stream):
+                    out = swap_weights_and_forward(self.template, cur_buf, h)
+                    output[tok_idx] += weights[idx] * out.squeeze(0)
 
             with torch.cuda.stream(self.compute_stream):
-                out = swap_weights_and_forward(self.template, cur_buf, h)
-                output[tok_idx] += weights[idx] * out.squeeze(0)
-
                 if cache is not None:
-                    slot = cache.allocate(layer_idx, eid)
-                    cache.get_packed(slot).copy_(cur_buf.packed)
+                    with (_prof.phase("cache_store") if _prof else _null_ctx()):
+                        slot = cache.allocate(layer_idx, eid)
+                        cache.get_packed(slot).copy_(cur_buf.packed)
 
                 buf_done[buf_idx] = torch.cuda.Event()
                 buf_done[buf_idx].record(self.compute_stream)
