@@ -106,10 +106,7 @@ def _build_inline_forward(layout, act_fn):
     # The template does: if w_dn.shape[0] == gated.shape[-1]. gated = intermediate_size.
     # For gate_up: output is 2*intermediate. After SwiGLU: intermediate.
     # So gated_dim = max(gu_shape) // 2 (chunk) or max(gu_shape) // 2 (interleaved)
-    if act_fn is not None:
-        gated_dim = max(gu_shape) // 2  # chunk splits in half
-    else:
-        gated_dim = max(gu_shape) // 2  # interleaved [::2] also halves
+    gated_dim = max(gu_shape) // 2  # both chunk and interleaved halve the output
     dn_needs_t = (dn_shape[0] == gated_dim)
 
     has_bias = "gate_up_proj_bias" in specs
@@ -156,90 +153,6 @@ def _build_inline_forward(layout, act_fn):
             return linear(gated, w_dn, b_dn)
 
     return _forward
-
-
-def _batched_expert_forward(
-    cache: "GenericLRUCache",
-    layout: "TensorLayout",
-    hidden: torch.Tensor,
-    hits: list[tuple[int, int]],
-    weights: torch.Tensor,
-    prefetch_events: dict,
-    act_fn=None,
-) -> torch.Tensor:
-    """Process all cache-hit experts in one shot via batched matmul.
-
-    Instead of N sequential forward calls, gathers weight views and does
-    2 batched matmuls (gate_up + down). Eliminates per-expert Python dispatch.
-    """
-    n = len(hits)
-    if n == 0:
-        return torch.zeros_like(hidden)
-
-    specs = layout.specs
-    gu_off = layout.offsets["gate_up_proj"]
-    gu_sz = layout.sizes["gate_up_proj"]
-    gu_shape, gu_dtype = specs["gate_up_proj"]
-    dn_off = layout.offsets["down_proj"]
-    dn_sz = layout.sizes["down_proj"]
-    dn_shape, dn_dtype = specs["down_proj"]
-
-    has_bias = "gate_up_proj_bias" in specs
-    if has_bias:
-        gub_off = layout.offsets["gate_up_proj_bias"]
-        gub_sz = layout.sizes["gate_up_proj_bias"]
-        gub_shape, gub_dtype = specs["gate_up_proj_bias"]
-        dnb_off = layout.offsets["down_proj_bias"]
-        dnb_sz = layout.sizes["down_proj_bias"]
-        dnb_shape, dnb_dtype = specs["down_proj_bias"]
-
-    gu_list = []
-    dn_list = []
-    gub_list = []
-    dnb_list = []
-    w_list = []
-    for i, slot in hits:
-        if slot in prefetch_events:
-            torch.cuda.current_stream().wait_event(prefetch_events.pop(slot))
-        packed = cache.get_packed(slot)
-        gu_list.append(packed[gu_off:gu_off + gu_sz].view(gu_dtype).view(gu_shape))
-        dn_list.append(packed[dn_off:dn_off + dn_sz].view(dn_dtype).view(dn_shape))
-        if has_bias:
-            gub_list.append(packed[gub_off:gub_off + gub_sz].view(gub_dtype).view(gub_shape))
-            dnb_list.append(packed[dnb_off:dnb_off + dnb_sz].view(dnb_dtype).view(dnb_shape))
-        w_list.append(weights[i])
-
-    gu_w = torch.stack(gu_list)
-    dn_w = torch.stack(dn_list)
-    h = hidden.unsqueeze(0).expand(n, -1, -1)
-
-    if gu_w.shape[1] == hidden.shape[-1]:
-        gate_up = torch.bmm(h, gu_w)
-    else:
-        gate_up = torch.bmm(h, gu_w.transpose(1, 2))
-
-    if has_bias:
-        gate_up = gate_up + torch.stack(gub_list).unsqueeze(1)
-
-    # Activation: SiLU/SwiGLU depending on model
-    if act_fn is not None:
-        gate, up = gate_up.chunk(2, dim=-1)
-        gated = act_fn(gate) * up
-    else:
-        gate = gate_up[..., ::2].clamp(max=7.0)
-        up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
-        gated = (up + 1) * gate * torch.sigmoid(gate * 1.702)
-
-    if dn_w.shape[1] == gated.shape[-1]:
-        out = torch.bmm(gated, dn_w)
-    else:
-        out = torch.bmm(gated, dn_w.transpose(1, 2))
-
-    if has_bias:
-        out = out + torch.stack(dnb_list).unsqueeze(1)
-
-    w_t = torch.stack(w_list).view(n, 1, 1)
-    return (out * w_t).sum(0)
 
 
 class GenericExpertPipeline:

@@ -418,8 +418,6 @@ class GenericExpertStore:
             else:
                 dst.copy_(src.view(torch.uint8).view(bf16_shape))
 
-    def prefetch(self, layer_idx: int, expert_idx: int):
-        pass
 
 
 class GenericLRUCache:

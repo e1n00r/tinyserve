@@ -50,7 +50,7 @@ def offload_model(
             are loaded directly from safetensors, bypassing HF dequantization.
             Non-expert weights remain as loaded in ``model``.
         cache_policy: eviction policy for the expert cache ('lru', 'slru',
-            'lfu', or 'fifo'). Default 'lru'.
+            'lfu', 'lfru', 'fifo', 'ls', or 'dali'). Default 'lfru'.
 
     Returns:
         The same model object with experts offloaded. Call model(input_ids)
@@ -103,7 +103,7 @@ def offload_model(
             cache_capacity = min(cache_capacity, max_capacity)
 
     cache = GenericLRUCache(cache_capacity, buf_bytes, device, policy=cache_policy) if cache_capacity > 0 else None
-    print(f"  Cache capacity: {cache_capacity} experts ({cache_capacity * store.expert_bytes / 1e9:.2f} GB GPU)")
+    print(f"  Cache capacity: {cache_capacity} experts ({cache_capacity * buf_bytes / 1e9:.2f} GB GPU)")
     for p in offloaded.pipelines:
         p.cache = cache
         p.cache_bias = cache_bias
