@@ -7,15 +7,10 @@ template module, calls forward(), accumulates weighted outputs.
 import torch
 import torch.nn as nn
 
-import contextlib
+from contextlib import nullcontext
 
 from .generic_store import GenericExpertBuffer, GenericExpertStore, GenericLRUCache
 from .profiler import OffloadProfiler
-
-
-@contextlib.contextmanager
-def _null_ctx():
-    yield
 
 
 def swap_weights_and_forward(
@@ -241,7 +236,7 @@ class GenericExpertPipeline:
 
         # GPU slot map lookup — no CUDA sync.
         if isinstance(expert_ids, torch.Tensor) and hasattr(cache, 'lookup_slots'):
-            with (_prof.phase("cache_lookup") if _prof else _null_ctx()):
+            with (_prof.phase("cache_lookup") if _prof else nullcontext()):
                 slots = cache.lookup_slots(layer_idx, expert_ids)
                 # ONE .tolist() for both slots and expert_ids — single CUDA sync.
                 slots_list = slots.tolist()
@@ -265,7 +260,7 @@ class GenericExpertPipeline:
             expert_ids_list = expert_ids
             hits = []
             misses = []
-            with (_prof.phase("cache_lookup") if _prof else _null_ctx()):
+            with (_prof.phase("cache_lookup") if _prof else nullcontext()):
                 for i, eid in enumerate(expert_ids_list):
                     slot = cache.lookup(layer_idx, eid)
                     if slot is not None:
@@ -274,7 +269,7 @@ class GenericExpertPipeline:
                         misses.append(i)
 
         for i, slot in hits:
-            with (_prof.phase("hit_compute") if _prof else _null_ctx()):
+            with (_prof.phase("hit_compute") if _prof else nullcontext()):
                 if slot in self._prefetch_events:
                     torch.cuda.current_stream().wait_event(self._prefetch_events.pop(slot))
                 packed = cache.get_packed(slot)
@@ -308,7 +303,7 @@ class GenericExpertPipeline:
         _prof = self.profiler
 
         load_done = torch.cuda.Event()
-        with (_prof.phase("h2d_transfer") if _prof else _null_ctx()):
+        with (_prof.phase("h2d_transfer") if _prof else nullcontext()):
             with torch.cuda.stream(self.transfer_stream):
                 self.store.copy_to_buffer(
                     bufs[0], layer_idx, expert_ids[indices[0]], non_blocking=True
@@ -326,7 +321,7 @@ class GenericExpertPipeline:
             if mi < len(indices) - 1:
                 next_buf_idx = 1 - buf_idx
                 load_done = torch.cuda.Event()
-                with (_prof.phase("h2d_transfer") if _prof else _null_ctx()):
+                with (_prof.phase("h2d_transfer") if _prof else nullcontext()):
                     with torch.cuda.stream(self.transfer_stream):
                         if buf_done[next_buf_idx] is not None:
                             self.transfer_stream.wait_event(buf_done[next_buf_idx])
@@ -336,14 +331,14 @@ class GenericExpertPipeline:
                         )
                         load_done.record(self.transfer_stream)
 
-            with (_prof.phase("gpu_compute") if _prof else _null_ctx()):
+            with (_prof.phase("gpu_compute") if _prof else nullcontext()):
                 with torch.cuda.stream(self.compute_stream):
                     out = swap_weights_and_forward(self.template, cur_buf, h)
                     output[tok_idx] += weights[idx] * out.squeeze(0)
 
             with torch.cuda.stream(self.compute_stream):
                 if cache is not None:
-                    with (_prof.phase("cache_store") if _prof else _null_ctx()):
+                    with (_prof.phase("cache_store") if _prof else nullcontext()):
                         slot = cache.allocate(layer_idx, eid)
                         cache.get_packed(slot).copy_(cur_buf.packed)
 
