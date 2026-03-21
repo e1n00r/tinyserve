@@ -452,8 +452,10 @@ def _install_offloaded_forward(
         # FATE accuracy: check whether the previous layer's prediction for THIS
         # layer (stored in _fate_pending[layer_idx]) matched the actual top_idx.
         # Only meaningful for single-token decode where FATE is active.
-        if flat.shape[0] == 1:
-            _record_fate_outcome(layer_idx, top_idx[0].tolist())
+        # Convert expert indices to Python list once (avoids duplicate CUDA sync).
+        _top_ids = top_idx[0].tolist() if flat.shape[0] == 1 else None
+        if _top_ids is not None:
+            _record_fate_outcome(layer_idx, _top_ids)
 
         # Cache-aware routing bias (ExpertFlow, arxiv 2510.26730):
         # Re-route using biased logits that favour GPU-resident experts, then
@@ -496,8 +498,8 @@ def _install_offloaded_forward(
 
         # Store actual routing for temporal locality prediction (used when adaptive_fate=True).
         # Must happen before the prefetch decision below so _last_routing is always current.
-        if flat.shape[0] == 1:
-            _last_routing[layer_idx] = top_idx[0].tolist()
+        if _top_ids is not None:
+            _last_routing[layer_idx] = _top_ids
 
         # FATE cross-layer prefetch (arxiv 2502.12224): adjacent layer gate inputs
         # have >83% cosine similarity, so running the NEXT layer's gate on the
