@@ -76,6 +76,11 @@ def _build_inline_forward(layout, act_fn):
     if "gate_up_proj" not in specs or "down_proj" not in specs:
         return None
 
+    # MXFP4 uses blocks+scales (uint8), not standard weight matrices.
+    # Fall back to template forward which handles _mxfp4_linear.
+    if "gate_up_proj_scales" in specs:
+        return None
+
     gu_off = layout.offsets["gate_up_proj"]
     gu_sz = layout.sizes["gate_up_proj"]
     gu_shape, gu_dtype = specs["gate_up_proj"]

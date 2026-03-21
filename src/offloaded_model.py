@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from .generic_store import GenericExpertStore, _is_qtensor
 from .generic_pipeline import GenericExpertPipeline
 from .mxfp4 import dequant_mxfp4_no_transpose
+from .profiler import OffloadProfiler
 
 _MXFP4_BACKEND = "pytorch"
 try:
@@ -142,6 +143,7 @@ class OffloadedModel(nn.Module):
         cache_policy: str = "lru",
         fp8: bool = True,
         adaptive_fate: bool = True,
+        profiler: "OffloadProfiler | None" = None,
     ) -> "OffloadedModel":
         model.eval()
         layers = model.layers
@@ -210,6 +212,7 @@ class OffloadedModel(nn.Module):
                 shared_stream=shared_stream,
             )
             pipeline._prefetch_fp8_stage = shared_prefetch_fp8_stage
+            pipeline.profiler = profiler
             pipelines.append(pipeline)
             moe_blocks.append(moe_block)
             routes.append(_extract_routing_fn(moe_block, router_attr, top_k, softmax_order))
@@ -230,6 +233,7 @@ class OffloadedModel(nn.Module):
                 next_route=next_route,
                 next_fate_fn=next_fate_fn,
                 adaptive_fate=adaptive_fate,
+                is_first_layer=(store_idx == 0),
             )
 
         return cls(model, pipelines), store, cache_capacity, cache_policy
@@ -292,7 +296,11 @@ class _FusedExpertTemplate(nn.Module):
         nn.Module.__init__(obj)
         obj._param_names = []
         for name, (shape, dtype) in layout.specs.items():
-            obj.register_parameter(name, nn.Parameter(torch.zeros(shape, dtype=dtype)))
+            data = torch.zeros(shape, dtype=dtype)
+            if dtype.is_floating_point:
+                obj.register_parameter(name, nn.Parameter(data))
+            else:
+                obj.register_parameter(name, nn.Parameter(data, requires_grad=False))
             obj._param_names.append(name)
         obj._act_fn = getattr(fused_container, "act_fn", None)
         obj._has_bias = "gate_up_proj_bias" in obj._param_names
@@ -407,12 +415,25 @@ def _install_offloaded_forward(
     next_route=None,
     next_fate_fn=None,
     adaptive_fate: bool = True,
+    is_first_layer: bool = False,
 ):
     route = _extract_routing_fn(moe_block, router_attr, top_k, softmax_order)
 
     shared_expert = getattr(moe_block, "shared_experts", None) or getattr(moe_block, "shared_expert", None)
 
+    import contextlib as _contextlib
+
+    @_contextlib.contextmanager
+    def _maybe_phase(prof, name):
+        if prof is not None:
+            with prof.phase(name):
+                yield
+        else:
+            yield
+
     def offloaded_forward(hidden_states, **_kwargs):
+        _prof = pipeline.profiler
+
         if hidden_states.dim() == 3:
             batch, seq_len, hidden = hidden_states.shape
             flat = hidden_states.view(-1, hidden)
@@ -500,10 +521,12 @@ def _install_offloaded_forward(
             if use_temporal:
                 predicted_list = _last_routing[target_layer]
             else:
-                with torch.no_grad():
-                    fate_idx, _ = _fate_fn(flat)
+                with (_maybe_phase(_prof, "fate_gate")):
+                    with torch.no_grad():
+                        fate_idx, _ = _fate_fn(flat)
                 predicted_list = fate_idx[0].tolist()
-            next_pipeline.schedule_prefetch(target_layer, predicted_list)
+            with (_maybe_phase(_prof, "schedule_prefetch")):
+                next_pipeline.schedule_prefetch(target_layer, predicted_list)
             _record_fate_prediction(target_layer, set(predicted_list))
 
         if batch is not None:

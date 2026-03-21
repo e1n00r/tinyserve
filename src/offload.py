@@ -152,5 +152,5 @@ def load_and_offload(
         **hf_kwargs,
     )
     return offload_model(model, device=device, cache_capacity=cache_capacity,
-                         cache_policy=cache_policy, fp8=fp8, cache_bias=cache_bias,
-                         adaptive_fate=adaptive_fate)
+                         model_id=model_id, cache_policy=cache_policy, fp8=fp8,
+                         cache_bias=cache_bias, adaptive_fate=adaptive_fate)
