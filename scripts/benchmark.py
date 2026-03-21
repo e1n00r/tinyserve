@@ -305,6 +305,167 @@ def _print_result(result: dict, cache_capacity: int | None = None):
     print(sep)
 
 
+def _run_trace(args) -> None:
+    """Load model, run 5 warmup + 10 torch.profiler tokens, export Chrome trace."""
+    import subprocess
+    from transformers import AutoTokenizer
+    from src.offload import load_and_offload
+    from src.offloaded_model import reset_temporal_routing
+
+    n_warmup = 5
+    n_profile = 10
+    trace_path = "/tmp/gpt_oss_trace.json"
+    model_id = args.model
+    prompt = args.prompt
+    cap = None if args.no_cache else args.cache_capacity
+    policy = args.cache_policy
+    fp8 = not args.no_fp8
+    adaptive = not args.no_adaptive_fate
+
+    print(f"[trace] Loading {model_id}…")
+    model = load_and_offload(
+        model_id, device="cuda",
+        cache_capacity=cap if cap is not None else 0,
+        cache_policy=policy,
+        fp8=fp8,
+        adaptive_fate=adaptive,
+    )
+    reset_temporal_routing()
+    tok = AutoTokenizer.from_pretrained(model_id)
+    input_ids = tok.encode(prompt, return_tensors="pt").to("cuda")
+
+    # Detect attention implementation from the loaded HF model layers.
+    inner = getattr(model, "model", model)
+    layers = getattr(inner, "layers", None)
+    if layers is not None and len(layers) > 0:
+        first_layer = layers[0]
+        attn = getattr(first_layer, "self_attn", None) or getattr(first_layer, "attention", None)
+        if attn is not None:
+            print(f"[trace] Attention class: {type(attn).__name__}")
+            print(f"[trace] Attention module: {type(attn).__module__}")
+        else:
+            print("[trace] Attention: not found on first layer")
+    else:
+        print("[trace] Attention: model has no .layers attribute")
+
+    # Check subprocess fallback for _attn_implementation config attribute.
+    result = subprocess.run(
+        ["python3", "-c",
+         f"from transformers import AutoConfig; "
+         f"cfg = AutoConfig.from_pretrained('{model_id}'); "
+         f"inner = getattr(cfg, 'text_config', cfg); "
+         f"print('_attn_implementation:', getattr(inner, '_attn_implementation', 'not set'))"],
+        capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode == 0:
+        print(f"[trace] {result.stdout.strip()}")
+    else:
+        print(f"[trace] _attn_implementation probe failed: {result.stderr.strip()[:200]}")
+
+    # Prefill
+    with torch.no_grad():
+        out = model(input_ids=input_ids, use_cache=False)
+    next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+
+    # 5 warmup tokens (outside profiler)
+    print(f"[trace] Warming up ({n_warmup} tokens, outside profiler)…")
+    for _ in range(n_warmup):
+        with torch.no_grad():
+            out = model(input_ids=next_token, use_cache=False)
+        next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+    torch.cuda.synchronize()
+
+    # Profile 10 tokens
+    print(f"[trace] Profiling {n_profile} tokens…")
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        record_shapes=True,
+        with_stack=False,
+    ) as prof:
+        for _ in range(n_profile):
+            with torch.no_grad():
+                out = model(input_ids=next_token, use_cache=False)
+            next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            torch.cuda.synchronize()
+
+    prof.export_chrome_trace(trace_path)
+    print(f"[trace] Chrome trace exported → {trace_path}")
+
+    print("\n[trace] Top-20 CUDA kernels by cuda_time_total:")
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+
+
+def _run_profile(args) -> None:
+    """Load model, run 20 warmup + N profiled tokens, print phase report."""
+    from transformers import AutoTokenizer
+    from src.offload import load_and_offload
+    from src.offloaded_model import reset_temporal_routing
+    from src.profiler import OffloadProfiler
+
+    n_warmup = 20
+    n_measure = getattr(args, "measure", 40)
+    model_id = args.model
+    prompt = args.prompt
+    cap = None if args.no_cache else args.cache_capacity
+    policy = args.cache_policy
+    fp8 = not args.no_fp8
+    adaptive = not args.no_adaptive_fate
+
+    print(f"[profile] Loading {model_id}…")
+    model = load_and_offload(
+        model_id, device="cuda",
+        cache_capacity=cap if cap is not None else 0,
+        cache_policy=policy,
+        fp8=fp8,
+        adaptive_fate=adaptive,
+    )
+    reset_temporal_routing()
+    tok = AutoTokenizer.from_pretrained(model_id)
+    input_ids = tok.encode(prompt, return_tensors="pt").to("cuda")
+
+    # Prefill
+    with torch.no_grad():
+        out = model(input_ids=input_ids, use_cache=False)
+    next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+
+    # Warmup (20 tokens, not measured)
+    print(f"[profile] Warming up ({n_warmup} tokens)…")
+    for _ in range(n_warmup):
+        with torch.no_grad():
+            out = model(input_ids=next_token, use_cache=False)
+        next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+
+    _reset_cache_stats(model)
+    reset_temporal_routing()
+
+    # Inject profiler into all pipelines
+    device = torch.device("cuda")
+    profiler = OffloadProfiler(device, enabled=True, mode="cpu")
+    for p in getattr(model, "_offload_pipelines", []):
+        p.profiler = profiler
+
+    # Profiled run
+    print(f"[profile] Profiling {n_measure} tokens…")
+    torch.cuda.synchronize()
+    for _ in range(n_measure):
+        profiler.begin_token()
+        with torch.no_grad():
+            out = model(input_ids=next_token, use_cache=False)
+        next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        torch.cuda.synchronize()
+        profiler.end_token()
+
+    # Collect cache hit/miss totals from the cache objects (authoritative counters).
+    total_hits, total_misses = _collect_cache_stats(model)
+    profiler.total_hits = total_hits
+    profiler.total_misses = total_misses
+
+    print(profiler.report())
+
+
 def main():
     parser = argparse.ArgumentParser(description="Benchmark offloaded MoE model decode")
     parser.add_argument("--model", default="openai/gpt-oss-20b",
@@ -337,7 +498,20 @@ def main():
     parser.add_argument("--no-adaptive-fate", action="store_true",
                         help="Disable adaptive FATE+temporal (default: on). When disabled, "
                              "FATE structural prediction is used for all layers.")
+    parser.add_argument("--profile", action="store_true",
+                        help="Run profiling mode: 20 warmup tokens, 40 profiled tokens, "
+                             "print per-phase breakdown")
+    parser.add_argument("--trace", action="store_true",
+                        help="Run torch.profiler trace: 5 warmup + 10 profiled tokens, "
+                             "export Chrome trace to /tmp/gpt_oss_trace.json and print "
+                             "top-20 CUDA kernel summary")
+    parser.add_argument("--capacity", type=int, default=None,
+                        help="Alias for --cache-capacity (for profiling convenience)")
     args = parser.parse_args()
+
+    # --capacity is a shorthand for --cache-capacity
+    if args.capacity is not None and args.cache_capacity is None:
+        args.cache_capacity = args.capacity
 
     if args.both_families:
         results = []
@@ -539,6 +713,14 @@ def main():
                 slru_hr = f"{slru['cache_hit_rate']*100:.1f}%"
                 print(f"  {'hit rate':<16}{lru_hr:>10}{slru_hr:>10}")
             print(sep)
+        return
+
+    if args.profile:
+        _run_profile(args)
+        return
+
+    if args.trace:
+        _run_trace(args)
         return
 
     result = run_benchmark(
