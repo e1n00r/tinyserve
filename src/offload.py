@@ -14,6 +14,60 @@ import torch
 from .model_registry import profile_from_config
 from .offloaded_model import OffloadedModel
 
+
+def _register_flex_attention() -> str:
+    """Register FlexAttention with sink support for GPT-OSS models.
+
+    Appends a virtual sink token to K/V and uses score_mod to inject
+    the per-head sink logit at the virtual position. This preserves
+    exact mathematical equivalence with eager attention while enabling
+    fused attention kernels (Flash/CuDNN on Blackwell).
+
+    Returns the attn_implementation string to use, or 'eager' on failure.
+    """
+    try:
+        from torch.nn.attention.flex_attention import flex_attention
+        import transformers
+
+        _compiled_flex = torch.compile(flex_attention)
+
+        def flex_attention_with_sinks(
+            module, query, key, value, attention_mask, scaling, dropout=0., **_
+        ):
+            N, H, L, E = query.shape
+            _, G, S, _ = key.shape
+            key_expanded = key.repeat_interleave(H // G, dim=1)
+            value_expanded = value.repeat_interleave(H // G, dim=1)
+            # Append virtual sink token (zero K/V).
+            sink_k = torch.zeros(N, H, 1, E, device=key.device, dtype=key.dtype)
+            sink_v = torch.zeros(N, H, 1, E, device=value.device, dtype=value.dtype)
+            k_ext = torch.cat([key_expanded, sink_k], dim=2)
+            v_ext = torch.cat([value_expanded, sink_v], dim=2)
+            sinks = module.sinks  # [H]
+            kv_len = S
+
+            def score_mod(score, b, h, q_idx, kv_idx):
+                return torch.where(kv_idx == kv_len, sinks[h], score)
+
+            out = _compiled_flex(
+                query, k_ext, v_ext, score_mod=score_mod, scale=scaling
+            )
+            return out.transpose(1, 2).contiguous(), None
+
+        transformers.AttentionInterface.register("flex", flex_attention_with_sinks)
+        try:
+            transformers.AttentionMaskInterface.register(
+                "flex", transformers.masking_utils.eager_mask
+            )
+        except Exception:
+            pass
+        gpt_oss_mod = getattr(transformers.models, "gpt_oss", None)
+        if gpt_oss_mod:
+            gpt_oss_mod.modeling_gpt_oss.GptOssPreTrainedModel._supports_flex = True
+        return "flex"
+    except Exception:
+        return "eager"
+
 _ROUTING_MAP = {
     "mixtral": ("router_native", False, "gate"),
     "qwen3_moe": ("router_native", False, "gate"),
@@ -124,6 +178,7 @@ def load_and_offload(
     torch_dtype=torch.bfloat16,
     fp8: bool = True,
     adaptive_fate: bool = True,
+    attn_implementation: str | None = None,
     **hf_kwargs,
 ) -> torch.nn.Module:
     """Load a HuggingFace MoE model and immediately offload its experts.
@@ -139,13 +194,18 @@ def load_and_offload(
     """
     from transformers import AutoModelForCausalLM
 
-    attn_impl = "eager"
-    if flash_attention:
-        try:
-            import flash_attn  # noqa: F401
-            attn_impl = "flash_attention_2"
-        except ImportError:
-            pass
+    if attn_implementation is not None:
+        attn_impl = attn_implementation
+        if attn_impl == "flex":
+            _register_flex_attention()
+    else:
+        attn_impl = "eager"
+        if flash_attention:
+            try:
+                import flash_attn  # noqa: F401
+                attn_impl = "flash_attention_2"
+            except ImportError:
+                pass
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
