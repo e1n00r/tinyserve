@@ -449,13 +449,11 @@ def _install_offloaded_forward(
 
         top_idx, routing_weights = route(flat)
 
-        # FATE accuracy: check whether the previous layer's prediction for THIS
-        # layer (stored in _fate_pending[layer_idx]) matched the actual top_idx.
-        # Only meaningful for single-token decode where FATE is active.
-        # Convert expert indices to Python list once (avoids duplicate CUDA sync).
-        _top_ids = top_idx[0].tolist() if flat.shape[0] == 1 else None
-        if _top_ids is not None:
-            _record_fate_outcome(layer_idx, _top_ids)
+        # FATE accuracy recording — diagnostic only, skipped in production.
+        # _record_fate_outcome requires .tolist() (CUDA sync). Only enable
+        # when _fate_stats is actively being collected (--fate-diagnostic).
+        if _fate_pending and flat.shape[0] == 1:
+            _record_fate_outcome(layer_idx, top_idx[0].tolist())
 
         # Cache-aware routing bias (ExpertFlow, arxiv 2510.26730):
         # Re-route using biased logits that favour GPU-resident experts, then
@@ -498,8 +496,10 @@ def _install_offloaded_forward(
 
         # Store actual routing for temporal locality prediction (used when adaptive_fate=True).
         # Must happen before the prefetch decision below so _last_routing is always current.
-        if _top_ids is not None:
-            _last_routing[layer_idx] = _top_ids
+        # Store routing as GPU tensor — no .tolist() sync on the hot path.
+        # schedule_prefetch handles conversion when it runs (overlapped with attention).
+        if flat.shape[0] == 1:
+            _last_routing[layer_idx] = top_idx[0]
 
         # FATE cross-layer prefetch (arxiv 2502.12224): adjacent layer gate inputs
         # have >83% cosine similarity, so running the NEXT layer's gate on the
@@ -521,15 +521,17 @@ def _install_offloaded_forward(
                 and target_layer in _last_routing
             )
             if use_temporal:
-                predicted_list = _last_routing[target_layer]
+                predicted = _last_routing[target_layer]  # GPU tensor
             else:
                 with (_maybe_phase(_prof, "fate_gate")):
                     with torch.no_grad():
                         fate_idx, _ = _fate_fn(flat)
-                predicted_list = fate_idx[0].tolist()
+                predicted = fate_idx[0]  # GPU tensor
             with (_maybe_phase(_prof, "schedule_prefetch")):
-                next_pipeline.schedule_prefetch(target_layer, predicted_list)
-            _record_fate_prediction(target_layer, set(predicted_list))
+                next_pipeline.schedule_prefetch(target_layer, predicted)
+            if _fate_pending:
+                predicted_list = predicted.tolist() if isinstance(predicted, torch.Tensor) else predicted
+                _record_fate_prediction(target_layer, set(predicted_list))
 
         if batch is not None:
             output = output.view(batch, seq_len, -1)

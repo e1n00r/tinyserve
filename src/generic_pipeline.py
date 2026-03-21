@@ -350,7 +350,7 @@ class GenericExpertPipeline:
                 buf_done[buf_idx] = torch.cuda.Event()
                 buf_done[buf_idx].record(self.compute_stream)
 
-    def schedule_prefetch(self, layer_idx: int, expert_ids: list[int]) -> None:
+    def schedule_prefetch(self, layer_idx: int, expert_ids: "list[int] | torch.Tensor") -> None:
         """Pre-load predicted experts into the VRAM cache for the next token.
 
         Uses temporal locality: the same experts are likely active next token.
@@ -363,6 +363,9 @@ class GenericExpertPipeline:
         """
         if self.cache is None:
             return
+        # Convert tensor to list once — this sync is overlapped with attention compute.
+        if isinstance(expert_ids, torch.Tensor):
+            expert_ids = expert_ids.tolist()
         self._prefetch_events.clear()
         with torch.cuda.stream(self._prefetch_stream):
             for eid in expert_ids:
