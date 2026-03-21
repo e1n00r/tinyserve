@@ -85,9 +85,20 @@ def _pack_tensors(
 class GenericExpertBuffer:
     """Pre-allocated GPU buffer for one expert's weights."""
 
-    def __init__(self, layout: TensorLayout, device: torch.device):
+    def __init__(
+        self,
+        layout: TensorLayout,
+        device: torch.device,
+        fp8_layout: "TensorLayout | None" = None,
+    ):
         self.layout = layout
         self.packed = torch.empty(layout.total_bytes, dtype=torch.uint8, device=device)
+        # GPU staging buffer for FP8 raw bytes (half the BF16 size).
+        # Populated by H2D DMA; GPU dequant reads from here → writes to packed.
+        self.fp8_stage: torch.Tensor | None = None
+        self.fp8_layout: TensorLayout | None = fp8_layout
+        if fp8_layout is not None:
+            self.fp8_stage = torch.empty(fp8_layout.total_bytes, dtype=torch.uint8, device=device)
 
     def get_tensor(self, name: str) -> torch.Tensor:
         shape, dtype = self.layout.specs[name]
@@ -139,6 +150,12 @@ class GenericExpertStore:
         num_experts: int,
         bf16_layout: "TensorLayout | None" = None,
     ):
+        if not data.is_pinned():
+            raise RuntimeError(
+                "GenericExpertStore: expert data must be pinned (cudaMallocHost) for "
+                "async DMA. Unpinned memory forces CUDA to stage through an internal "
+                "bounce buffer, doubling effective bandwidth cost."
+            )
         self._data = data
         self.layout = layout
         self.num_layers = num_layers
@@ -364,7 +381,8 @@ class GenericExpertStore:
         return self._bf16_layout is not self.layout
 
     def allocate_buffer(self, device: torch.device) -> "GenericExpertBuffer":
-        return GenericExpertBuffer(self._bf16_layout, device)
+        fp8_layout = self.layout if self._fp8 else None
+        return GenericExpertBuffer(self._bf16_layout, device, fp8_layout=fp8_layout)
 
     def copy_to_buffer(
         self,
@@ -374,30 +392,31 @@ class GenericExpertStore:
         non_blocking: bool = False,
     ):
         if not self._fp8:
+            # BF16 / native-quant path — single async H2D, minimal overhead.
             buf.packed.copy_(self._data[layer_idx, expert_idx], non_blocking=non_blocking)
             return
-        # FP8 path: dequant to BF16 on CPU using a per-buffer pinned staging area,
-        # then single bulk H2D.  One staging buffer per GenericExpertBuffer avoids
-        # contention between the two pipeline slots (buf_a / buf_b).
-        if not hasattr(self, "_cpu_bf16_stages"):
-            self._cpu_bf16_stages: dict[int, torch.Tensor] = {}
-        buf_key = id(buf)
-        if buf_key not in self._cpu_bf16_stages:
-            self._cpu_bf16_stages[buf_key] = torch.empty(
-                self.buffer_expert_bytes, dtype=torch.uint8
-            ).pin_memory()
-        cpu_stage = self._cpu_bf16_stages[buf_key]
-        fp8_data = self._data[layer_idx, expert_idx]
-        for name, (bf16_shape, bf16_dtype) in self._bf16_layout.specs.items():
-            fp8_offset = self.layout.offsets[name]
-            fp8_bytes = self.layout.sizes[name]
-            fp8_shape, fp8_dtype = self.layout.specs[name]
-            bf16_offset = self._bf16_layout.offsets[name]
-            bf16_bytes = self._bf16_layout.sizes[name]
-            src = fp8_data[fp8_offset:fp8_offset + fp8_bytes].view(fp8_dtype).view(fp8_shape)
-            dst = cpu_stage[bf16_offset:bf16_offset + bf16_bytes].view(bf16_dtype).view(bf16_shape)
-            dst.copy_(src)  # CPU: FP8→BF16 dtype cast
-        buf.packed.copy_(cpu_stage, non_blocking=non_blocking)
+
+        # Fix A: GPU-side FP8→BF16 dequant.
+        # Step 1: H2D raw FP8 bytes (half the BF16 size → ~1ms at PCIe 4.0).
+        #         non_blocking=True: CPU returns immediately; GPU copy runs on
+        #         the calling stream (transfer_stream) and completes before any
+        #         subsequent ops enqueued on that same stream.
+        buf.fp8_stage.copy_(self._data[layer_idx, expert_idx], non_blocking=non_blocking)
+
+        # Step 2: GPU dequant per tensor — runs on calling stream after Step 1.
+        #         ~0.1ms GPU kernel instead of 9.5ms CPU loop.
+        for name, (fp8_shape, fp8_dtype) in self.layout.specs.items():
+            fp8_off = self.layout.offsets[name]
+            fp8_sz = self.layout.sizes[name]
+            bf16_off = self._bf16_layout.offsets[name]
+            bf16_sz = self._bf16_layout.sizes[name]
+            bf16_shape, bf16_dtype = self._bf16_layout.specs[name]
+            src = buf.fp8_stage[fp8_off:fp8_off + fp8_sz].view(fp8_dtype).view(fp8_shape)
+            dst = buf.packed[bf16_off:bf16_off + bf16_sz].view(bf16_dtype).view(bf16_shape)
+            if fp8_dtype.is_floating_point:
+                dst.copy_(src.to(bf16_dtype))
+            else:
+                dst.copy_(src.view(torch.uint8).view(bf16_shape))
 
     def prefetch(self, layer_idx: int, expert_idx: int):
         pass
@@ -423,6 +442,20 @@ class GenericLRUCache:
         else:
             self.misses += 1
         return slot
+
+    def contains(self, layer_idx: int, expert_idx: int) -> bool:
+        """Check if expert is in cache without updating policy state or stats."""
+        return self._policy.contains((layer_idx, expert_idx))
+
+    def begin_pass(self) -> None:
+        """Notify the policy that a new token forward pass is starting.
+
+        Only meaningful for LeastStalePolicy — rotates fresh→stale so experts
+        loaded for the previous token become eviction candidates. No-op for
+        all other policies.
+        """
+        if hasattr(self._policy, "begin_pass"):
+            self._policy.begin_pass()
 
     def allocate(self, layer_idx: int, expert_idx: int) -> int:
         key = (layer_idx, expert_idx)

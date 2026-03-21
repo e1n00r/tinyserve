@@ -15,7 +15,7 @@ def swap_weights_and_forward(
     buf: GenericExpertBuffer,
     hidden_states: torch.Tensor,
 ) -> torch.Tensor:
-    """Swap buffer tensors into template module params, run forward."""
+    """Copy buffer tensors into the template module's parameters, run forward."""
     with torch.no_grad():
         for name, (shape, dtype) in buf.layout.specs.items():
             parts = name.split(".")
@@ -52,7 +52,14 @@ class GenericExpertPipeline:
         self.compute_stream = compute_stream
 
         self.cache = cache
+        self.cache_bias: float = 0.0  # logit bias magnitude for cache-aware routing (I4)
         self.shared_stream = shared_stream if shared_stream is not None else torch.cuda.Stream(device)
+        self._prefetch_stream = torch.cuda.Stream(device)
+        self._prefetch_events: dict[int, torch.cuda.Event] = {}  # slot -> H2D-complete event
+        # Shared FP8 prefetch staging buffer — injected from outside (one per model,
+        # not one per layer) since only one prefetch runs at a time during decode.
+        # Set by OffloadedModel.from_module after construction.
+        self._prefetch_fp8_stage: torch.Tensor | None = None
 
     def execute_layer_experts(
         self,
@@ -85,7 +92,10 @@ class GenericExpertPipeline:
         if self.cache is None:
             self._pipeline_experts(h, output, tok_idx, layer_idx, expert_ids, weights,
                                    list(range(len(expert_ids))))
-            self.compute_stream.synchronize()
+            # Fix B: GPU-side inter-stream sync — CPU thread free to continue.
+            _evt = torch.cuda.Event()
+            _evt.record(self.compute_stream)
+            torch.cuda.current_stream().wait_event(_evt)
             return
 
         cache = self.cache
@@ -99,6 +109,9 @@ class GenericExpertPipeline:
                 misses.append(i)
 
         for i, slot in hits:
+            if slot in self._prefetch_events:
+                # Prefetch H2D may still be in flight — sync before reading the cache slot.
+                torch.cuda.current_stream().wait_event(self._prefetch_events.pop(slot))
             cache.load_to_buffer(slot, self.buf_a)
             out = swap_weights_and_forward(self.template, self.buf_a, h)
             output[tok_idx] += weights[i] * out.squeeze(0)
@@ -107,7 +120,9 @@ class GenericExpertPipeline:
             return
 
         self._pipeline_experts(h, output, tok_idx, layer_idx, expert_ids, weights, misses)
-        self.compute_stream.synchronize()
+        _evt = torch.cuda.Event()
+        _evt.record(self.compute_stream)
+        torch.cuda.current_stream().wait_event(_evt)
 
     def _pipeline_experts(
         self,
@@ -160,3 +175,47 @@ class GenericExpertPipeline:
 
                 buf_done[buf_idx] = torch.cuda.Event()
                 buf_done[buf_idx].record(self.compute_stream)
+
+    def schedule_prefetch(self, layer_idx: int, expert_ids: list[int]) -> None:
+        """Pre-load predicted experts into the VRAM cache for the next token.
+
+        Uses temporal locality: the same experts are likely active next token.
+        Runs on a dedicated prefetch stream — fully overlapped with other layers'
+        attention + expert compute between now and the next call to this layer.
+
+        FP8 path: H2D raw FP8 bytes → _prefetch_fp8_stage (half-size, fast),
+        then GPU dequant → cache slot. No CPU blocking.
+        BF16 path: direct pinned-CPU → VRAM-cache DMA.
+        """
+        if self.cache is None:
+            return
+        self._prefetch_events.clear()
+        with torch.cuda.stream(self._prefetch_stream):
+            for eid in expert_ids:
+                if self.cache.contains(layer_idx, eid):
+                    continue
+                slot = self.cache.allocate(layer_idx, eid)
+                cache_slot = self.cache.get_packed(slot)
+                if self.store._fp8:
+                    # Step 1: H2D raw FP8 bytes (half the BF16 size).
+                    self._prefetch_fp8_stage.copy_(
+                        self.store._data[layer_idx, eid], non_blocking=True
+                    )
+                    # Step 2: GPU dequant per tensor → cache slot (BF16).
+                    for name, (fp8_shape, fp8_dtype) in self.store.layout.specs.items():
+                        fp8_off = self.store.layout.offsets[name]
+                        fp8_sz = self.store.layout.sizes[name]
+                        bf16_off = self.store._bf16_layout.offsets[name]
+                        bf16_sz = self.store._bf16_layout.sizes[name]
+                        bf16_shape, bf16_dtype = self.store._bf16_layout.specs[name]
+                        src = self._prefetch_fp8_stage[fp8_off:fp8_off + fp8_sz].view(fp8_dtype).view(fp8_shape)
+                        dst = cache_slot[bf16_off:bf16_off + bf16_sz].view(bf16_dtype).view(bf16_shape)
+                        if fp8_dtype.is_floating_point:
+                            dst.copy_(src.to(bf16_dtype))
+                        else:
+                            dst.copy_(src.view(torch.uint8).view(bf16_shape))
+                else:
+                    cache_slot.copy_(self.store._data[layer_idx, eid], non_blocking=True)
+                evt = torch.cuda.Event()
+                evt.record(self._prefetch_stream)
+                self._prefetch_events[slot] = evt

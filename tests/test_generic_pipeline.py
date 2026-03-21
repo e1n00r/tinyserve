@@ -150,6 +150,58 @@ def test_cache_hits_match_misses():
 
 
 @requires_cuda
+def test_least_stale_hits_after_begin_pass():
+    """LeastStalePolicy: after begin_pass(), experts from the previous token are hits."""
+    from src.generic_store import GenericExpertStore, GenericLRUCache
+    from src.generic_pipeline import GenericExpertPipeline
+
+    hidden, intermediate = 32, 64
+    num_layers, num_experts = 4, 8
+    expert_weights = _build_expert_weights(num_layers, num_experts, hidden, intermediate)
+    store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts, fp8=True)
+    device = torch.device("cuda")
+    template = TinySwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
+
+    cache = GenericLRUCache(32, store.buffer_expert_bytes, device, policy="ls")
+    shared_transfer = torch.cuda.Stream(device)
+    shared_compute = torch.cuda.Stream(device)
+
+    pipelines = [
+        GenericExpertPipeline(
+            store, template, device,
+            buf_a=store.allocate_buffer(device),
+            buf_b=store.allocate_buffer(device),
+            transfer_stream=shared_transfer,
+            compute_stream=shared_compute,
+            cache=cache,
+        )
+        for _ in range(num_layers)
+    ]
+
+    h = torch.randn(1, hidden, device=device, dtype=torch.bfloat16)
+    expert_indices = torch.tensor([[2, 5]])
+    rw = torch.tensor([[0.6, 0.4]], device=device, dtype=torch.bfloat16)
+
+    # Token 1: populate cache across all layers (all misses)
+    for li, p in enumerate(pipelines):
+        p.execute_layer_experts(h, li, expert_indices, rw)
+    torch.cuda.synchronize()
+    assert cache.hits == 0
+    assert cache.misses == num_layers * 2
+    cache.reset_stats()
+
+    # begin_pass() simulates the start of token 2 (called on layer 0)
+    cache.begin_pass()
+
+    # Token 2: same experts → all hits
+    for li, p in enumerate(pipelines):
+        p.execute_layer_experts(h, li, expert_indices, rw)
+    torch.cuda.synchronize()
+    assert cache.hits == num_layers * 2, f"Expected {num_layers * 2} hits, got {cache.hits}"
+    assert cache.misses == 0
+
+
+@requires_cuda
 def test_multi_token():
     """Pipeline handles multiple tokens correctly."""
     from src.generic_store import GenericExpertStore

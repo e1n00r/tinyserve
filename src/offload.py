@@ -33,6 +33,8 @@ def offload_model(
     model_id: str | None = None,
     cache_policy: str = "lfru",
     fp8: bool = True,
+    cache_bias: float = 0.0,
+    adaptive_fate: bool = True,
 ) -> torch.nn.Module:
     """Offload MoE experts from an HF model to CPU with GPU LRU cache.
 
@@ -80,6 +82,7 @@ def offload_model(
         model_id=model_id,
         cache_policy=cache_policy,
         fp8=fp8,
+        adaptive_fate=adaptive_fate,
     )
 
     if hasattr(model, "model"):
@@ -103,6 +106,7 @@ def offload_model(
     print(f"  Cache capacity: {cache_capacity} experts ({cache_capacity * store.expert_bytes / 1e9:.2f} GB GPU)")
     for p in offloaded.pipelines:
         p.cache = cache
+        p.cache_bias = cache_bias
 
     return model
 
@@ -112,9 +116,11 @@ def load_and_offload(
     device: str | torch.device = "cuda",
     cache_capacity: int = 0,
     cache_policy: str = "lfru",
+    cache_bias: float = 0.0,
     flash_attention: bool = True,
     torch_dtype=torch.bfloat16,
     fp8: bool = True,
+    adaptive_fate: bool = True,
     **hf_kwargs,
 ) -> torch.nn.Module:
     """Load a HuggingFace MoE model and immediately offload its experts.
@@ -123,7 +129,7 @@ def load_and_offload(
         model_id: HuggingFace repo id or local path
         device: GPU device
         cache_capacity: expert slots in VRAM (0 = auto)
-        cache_policy: 'lru', 'slru', 'lfu', 'lfru', or 'fifo'
+        cache_policy: 'lru', 'slru', 'lfu', 'lfru', 'fifo', or 'ls' (least-stale, default)
         flash_attention: use flash_attention_2 if available (default True)
         torch_dtype: weight dtype (default bfloat16)
         **hf_kwargs: passed through to AutoModelForCausalLM.from_pretrained
@@ -146,4 +152,5 @@ def load_and_offload(
         **hf_kwargs,
     )
     return offload_model(model, device=device, cache_capacity=cache_capacity,
-                         cache_policy=cache_policy, fp8=fp8)
+                         cache_policy=cache_policy, fp8=fp8, cache_bias=cache_bias,
+                         adaptive_fate=adaptive_fate)
