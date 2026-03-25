@@ -1,0 +1,12 @@
+=== FlexAttention Final ===
+experts=100, VRAM free=2877MB
+Compiling...
+OK
+   ctx   tok/s   HR%
+    10    2.4   54%
+    50    0.8   81%
+   100    2.8   88%
+   500    1.2   97%
+  1000    0.7   98%
+  1201    0.6   99%
+Done.
