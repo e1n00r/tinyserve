@@ -317,30 +317,33 @@ class GenericExpertPipeline:
         if not misses:
             return
 
-        # CPU expert path: compute misses on CPU via RAMCache + CPUExpertForward.
-        # Only for single-token decode (batch=1). Falls back to GPU pipeline otherwise.
-        if self.cpu_expert is not None and h.shape[0] == 1:
+        # Split misses: RAM-cached experts go to GPU pipeline (fast H2D from pinned),
+        # truly cold experts (not in RAM) use CPU compute to avoid mmap page fault stall.
+        if self.cpu_expert is not None and self.ram_cache is not None and h.shape[0] == 1:
             ram = self.ram_cache
+            cold_misses = []
             for i in misses:
                 eid = expert_ids_list[i]
-                # Try to get expert data from RAM cache.
-                if ram is not None:
-                    ram.wait_pending(layer_idx, eid)
-                    slot = ram.lookup(layer_idx, eid)
-                    if slot is not None:
-                        expert_data = ram.get_slot_data(slot)
-                    else:
-                        expert_data = ram.load_sync(layer_idx, eid, self.store._data[layer_idx, eid])
-                        expert_data = ram.get_slot_data(expert_data)
+                ram.wait_pending(layer_idx, eid)
+                slot = ram.lookup(layer_idx, eid)
+                if slot is not None:
+                    # Expert is in pinned RAM — GPU pipeline is faster (async H2D + overlap)
+                    cold_misses.append(i)  # let _pipeline_experts handle it via store._data
                 else:
+                    # Truly cold: not in RAM, would page-fault from mmap.
+                    # CPU compute (1.9ms) beats mmap page fault (20ms) + GPU transfer.
                     expert_data = self.store._data[layer_idx, eid]
-                out = self.cpu_expert.forward(h, expert_data)
-                output[tok_idx] += weights[i] * out.squeeze(0)
-                # Also populate GPU cache if available.
-                if cache is not None:
-                    gpu_slot = cache.allocate(layer_idx, eid)
-                    cache.get_packed(gpu_slot).copy_(expert_data, non_blocking=True)
-            return
+                    out = self.cpu_expert.forward(h, expert_data)
+                    output[tok_idx] += weights[i] * out.squeeze(0)
+                    # Load into RAM cache for next time
+                    ram.load_sync(layer_idx, eid, expert_data)
+                    # Populate GPU cache too
+                    if cache is not None:
+                        gpu_slot = cache.allocate(layer_idx, eid)
+                        cache.get_packed(gpu_slot).copy_(ram.get_slot_data(ram.lookup(layer_idx, eid)), non_blocking=True)
+            if not cold_misses:
+                return
+            misses = cold_misses
 
         self._pipeline_experts(h, output, tok_idx, layer_idx, expert_ids_list, weights, misses)
         _evt = torch.cuda.Event()
@@ -362,9 +365,19 @@ class GenericExpertPipeline:
         buf_done: list[torch.cuda.Event | None] = [None, None]
         _prof = self.profiler
 
+        def _load_expert(buf, li, eid):
+            """Load expert into GPU buffer — from RAMCache (pinned, fast) or store (mmap)."""
+            if self.ram_cache is not None:
+                slot = self.ram_cache.lookup(li, eid)
+                if slot is not None:
+                    # Pinned RAM → GPU at full PCIe bandwidth
+                    buf.packed.copy_(self.ram_cache.get_slot_data(slot), non_blocking=True)
+                    return
+            self.store.copy_to_buffer(buf, li, eid, non_blocking=True)
+
         load_done = torch.cuda.Event()
         with _prof.phase("h2d_transfer") if _prof else nullcontext(), torch.cuda.stream(self.transfer_stream):
-            self.store.copy_to_buffer(bufs[0], layer_idx, expert_ids[indices[0]], non_blocking=True)
+            _load_expert(bufs[0], layer_idx, expert_ids[indices[0]])
             load_done.record(self.transfer_stream)
 
         for mi in range(len(indices)):
@@ -382,11 +395,10 @@ class GenericExpertPipeline:
                     with torch.cuda.stream(self.transfer_stream):
                         if buf_done[next_buf_idx] is not None:
                             self.transfer_stream.wait_event(buf_done[next_buf_idx])
-                        self.store.copy_to_buffer(
+                        _load_expert(
                             bufs[next_buf_idx],
                             layer_idx,
                             expert_ids[indices[mi + 1]],
-                            non_blocking=True,
                         )
                         load_done.record(self.transfer_stream)
 
