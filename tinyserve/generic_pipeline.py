@@ -13,6 +13,11 @@ from .generic_store import GenericExpertBuffer, GenericExpertStore, GenericLRUCa
 from .profiler import OffloadProfiler
 from .ram_cache import madvise_willneed
 
+try:
+    from .csrc import get_expert_loop as _get_expert_loop
+except Exception:
+    _get_expert_loop = lambda: None  # noqa: E731
+
 
 _TEMPLATE_STORAGE: dict[int, dict[str, torch.Tensor]] = {}
 
@@ -182,6 +187,83 @@ def _build_inline_forward(layout, act_fn):
     return _forward
 
 
+_DTYPE_TO_INT = {
+    torch.uint8: 0,
+    torch.int8: 1,
+    torch.int16: 2,
+    torch.int32: 3,
+    torch.int64: 4,
+    torch.float16: 5,
+    torch.float32: 6,
+    torch.float64: 7,
+    torch.bfloat16: 15,
+}
+
+
+def _build_cpp_layout_args(layout, act_fn):
+    """Build the layout arguments needed by the C++ fast_expert_forward."""
+    specs = layout.specs
+
+    if "gate_up_proj" not in specs or "down_proj" not in specs:
+        return None
+    if "gate_up_proj_scales" in specs:
+        return None
+
+    gu_off = layout.offsets["gate_up_proj"]
+    gu_sz = layout.sizes["gate_up_proj"]
+    gu_shape, gu_dtype = specs["gate_up_proj"]
+    dn_off = layout.offsets["down_proj"]
+    dn_sz = layout.sizes["down_proj"]
+    dn_shape, dn_dtype = specs["down_proj"]
+
+    hidden_dim = min(gu_shape)
+    gu_needs_t = gu_shape[0] == hidden_dim
+    gated_dim = max(gu_shape) // 2
+    dn_needs_t = dn_shape[0] == gated_dim
+
+    has_bias = "gate_up_proj_bias" in specs
+    gub_off = gub_sz = dnb_off = dnb_sz = 0
+    gub_shape = [1]
+    dnb_shape = [1]
+    gub_dtype_int = dnb_dtype_int = _DTYPE_TO_INT.get(gu_dtype, 6)
+    if has_bias:
+        gub_off = layout.offsets["gate_up_proj_bias"]
+        gub_sz = layout.sizes["gate_up_proj_bias"]
+        gub_shape_t, gub_dt = specs["gate_up_proj_bias"]
+        gub_shape = list(gub_shape_t)
+        gub_dtype_int = _DTYPE_TO_INT.get(gub_dt, 6)
+        dnb_off = layout.offsets["down_proj_bias"]
+        dnb_sz = layout.sizes["down_proj_bias"]
+        dnb_shape_t, dnb_dt = specs["down_proj_bias"]
+        dnb_shape = list(dnb_shape_t)
+        dnb_dtype_int = _DTYPE_TO_INT.get(dnb_dt, 6)
+
+    activation = "silu" if act_fn is not None else "swiglu"
+
+    return {
+        "gu_offset": gu_off,
+        "gu_size": gu_sz,
+        "gu_shape": list(gu_shape),
+        "gu_dtype_int": _DTYPE_TO_INT.get(gu_dtype, 6),
+        "gu_needs_transpose": gu_needs_t,
+        "dn_offset": dn_off,
+        "dn_size": dn_sz,
+        "dn_shape": list(dn_shape),
+        "dn_dtype_int": _DTYPE_TO_INT.get(dn_dtype, 6),
+        "dn_needs_transpose": dn_needs_t,
+        "has_bias": has_bias,
+        "gub_offset": gub_off,
+        "gub_size": gub_sz,
+        "gub_shape": gub_shape,
+        "gub_dtype_int": gub_dtype_int,
+        "dnb_offset": dnb_off,
+        "dnb_size": dnb_sz,
+        "dnb_shape": dnb_shape,
+        "dnb_dtype_int": dnb_dtype_int,
+        "activation": activation,
+    }
+
+
 class GenericExpertPipeline:
     """Double-buffered PCIe pipeline with LRU cache for any expert module."""
 
@@ -227,6 +309,9 @@ class GenericExpertPipeline:
         # not one per layer) since only one prefetch runs at a time during decode.
         # Set by OffloadedModel.from_module after construction.
         self._prefetch_fp8_stage: torch.Tensor | None = None
+        # C++ expert loop: precomputed layout args + module handle.
+        self._cpp_layout_args = _build_cpp_layout_args(bf16_layout, self._act_fn)
+        self._cpp_ext = _get_expert_loop() if self._cpp_layout_args is not None else None
 
     def execute_layer_experts(
         self,
@@ -303,6 +388,50 @@ class GenericExpertPipeline:
                     else:
                         misses.append(i)
 
+        # C++ fast path: all hits, no pending prefetch events, extension loaded.
+        _cpp = self._cpp_ext
+        if (
+            _cpp is not None
+            and not misses
+            and hits
+            and not any(s in self._prefetch_events for _, s in hits)
+        ):
+            _args = self._cpp_layout_args
+            slots_tensor = torch.tensor(
+                [s for _, s in hits], dtype=torch.int32, device=h.device
+            )
+            weights_tensor = torch.tensor(
+                [weights[i].item() for i, _ in hits], dtype=torch.float32, device=h.device
+            )
+            out = _cpp.fast_expert_forward(
+                h,
+                slots_tensor,
+                weights_tensor,
+                cache._packed,
+                _args["gu_offset"],
+                _args["gu_size"],
+                _args["gu_shape"],
+                _args["gu_dtype_int"],
+                _args["gu_needs_transpose"],
+                _args["dn_offset"],
+                _args["dn_size"],
+                _args["dn_shape"],
+                _args["dn_dtype_int"],
+                _args["dn_needs_transpose"],
+                _args["has_bias"],
+                _args["gub_offset"],
+                _args["gub_size"],
+                _args["gub_shape"],
+                _args["gub_dtype_int"],
+                _args["dnb_offset"],
+                _args["dnb_size"],
+                _args["dnb_shape"],
+                _args["dnb_dtype_int"],
+                _args["activation"],
+            )
+            output[tok_idx] += out.squeeze(0)
+            return
+
         for i, slot in hits:
             with _prof.phase("hit_compute") if _prof else nullcontext():
                 if slot in self._prefetch_events:
@@ -330,13 +459,12 @@ class GenericExpertPipeline:
                     # Expert is in pinned RAM — GPU pipeline is faster (async H2D + overlap)
                     cold_misses.append(i)  # let _pipeline_experts handle it via store._data
                 else:
-                    # Truly cold: not in RAM, would page-fault from mmap.
-                    # CPU compute (1.9ms) beats mmap page fault (20ms) + GPU transfer.
-                    expert_data = self.store._data[layer_idx, eid]
+                    # Truly cold: not in RAM. Load via pread (or mmap fallback)
+                    # then CPU compute from cached pinned data.
+                    ram_slot = ram.load_sync(layer_idx, eid, self.store._data[layer_idx, eid])
+                    expert_data = ram.get_slot_data(ram_slot)
                     out = self.cpu_expert.forward(h, expert_data)
                     output[tok_idx] += weights[i] * out.squeeze(0)
-                    # Load into RAM cache for next time
-                    ram.load_sync(layer_idx, eid, expert_data)
                     # Populate GPU cache too
                     if cache is not None:
                         gpu_slot = cache.allocate(layer_idx, eid)
@@ -462,10 +590,14 @@ class GenericExpertPipeline:
         # RAM cache prefetch: async load from mmap into pinned RAM.
         # Prime page cache with madvise(WILLNEED) before the threadpool copy.
         if self.ram_cache is not None and getattr(self.store, "_disk_offload", False):
+            has_fast_reader = self.ram_cache._fast_reader is not None
             for eid in expert_ids:
                 if not self.ram_cache.contains(layer_idx, eid):
-                    madvise_willneed(self.store._data[layer_idx, eid])
-                    self.ram_cache.prefetch_async(layer_idx, eid, self.store._data[layer_idx, eid])
+                    if has_fast_reader:
+                        self.ram_cache.prefetch_async(layer_idx, eid)
+                    else:
+                        madvise_willneed(self.store._data[layer_idx, eid])
+                        self.ram_cache.prefetch_async(layer_idx, eid, self.store._data[layer_idx, eid])
         elif self.ram_cache is not None:
             for eid in expert_ids:
                 if not self.ram_cache.contains(layer_idx, eid):
