@@ -8,12 +8,18 @@ Thread-safe: all LRU state mutations are protected by a single lock.
 Async prefetch uses a bounded ThreadPoolExecutor for SSD reads.
 """
 
+from __future__ import annotations
+
 import ctypes
 import threading
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from .fast_io import FastExpertReader
 
 MADV_WILLNEED = 3
 _libc = None
@@ -52,6 +58,7 @@ class RAMCache:
         num_slots: int,
         expert_bytes: int,
         max_workers: int = 4,
+        fast_reader: FastExpertReader | None = None,
     ):
         if num_slots <= 0:
             raise ValueError(f"num_slots must be positive, got {num_slots}")
@@ -71,6 +78,7 @@ class RAMCache:
         self._pending: dict[tuple[int, int], Future] = {}
 
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._fast_reader = fast_reader
 
         self.hits = 0
         self.misses = 0
@@ -103,7 +111,7 @@ class RAMCache:
         self,
         layer_idx: int,
         expert_idx: int,
-        src: torch.Tensor,
+        src: torch.Tensor | None = None,
     ) -> int:
         key = (layer_idx, expert_idx)
         with self._lock:
@@ -112,14 +120,17 @@ class RAMCache:
                 return self._lru[key]
             slot = self._allocate_slot()
             self._lru[key] = slot
-        self._pool[slot].copy_(src)
+        if self._fast_reader is not None:
+            self._fast_reader.read_expert(layer_idx, expert_idx, self._pool[slot])
+        else:
+            self._pool[slot].copy_(src)
         return slot
 
     def prefetch_async(
         self,
         layer_idx: int,
         expert_idx: int,
-        src: torch.Tensor,
+        src: torch.Tensor | None = None,
     ) -> None:
         key = (layer_idx, expert_idx)
         with self._lock:
@@ -127,9 +138,13 @@ class RAMCache:
                 return
             slot = self._allocate_slot()
             self._lru[key] = slot
-            # Prime kernel page cache before the threadpool copy.
-            madvise_willneed(src)
-            future = self._executor.submit(self._pool[slot].copy_, src)
+            if self._fast_reader is not None:
+                future = self._executor.submit(
+                    self._fast_reader.read_expert, layer_idx, expert_idx, self._pool[slot],
+                )
+            else:
+                madvise_willneed(src)
+                future = self._executor.submit(self._pool[slot].copy_, src)
             self._pending[key] = future
 
     def wait_pending(self, layer_idx: int, expert_idx: int) -> None:
@@ -150,15 +165,18 @@ class RAMCache:
 
     def start_background_fill(
         self,
-        mmap_data: torch.Tensor,
+        mmap_data: torch.Tensor | None,
         num_layers: int,
         num_experts: int,
     ) -> threading.Thread:
-        """Start daemon thread that loads ALL experts from mmap into cache.
+        """Start daemon thread that loads ALL experts from mmap or pread into cache.
 
         Uses round-robin across layers (L0E0, L1E0, L2E0, ..., L0E1, L1E1, ...)
         so every layer gets some experts quickly.
         Non-blocking -- inference can proceed while fill runs.
+
+        When a FastExpertReader is configured, mmap_data is ignored and reads
+        go through pread (bypassing page fault overhead).
         """
         self._fill_done = threading.Event()
 
@@ -167,7 +185,10 @@ class RAMCache:
                 for expert_idx in range(num_experts):
                     for layer_idx in range(num_layers):
                         if (layer_idx, expert_idx) not in self._lru:
-                            self.load_sync(layer_idx, expert_idx, mmap_data[layer_idx, expert_idx])
+                            if self._fast_reader is not None:
+                                self.load_sync(layer_idx, expert_idx)
+                            else:
+                                self.load_sync(layer_idx, expert_idx, mmap_data[layer_idx, expert_idx])
             finally:
                 self._fill_done.set()
 

@@ -463,8 +463,16 @@ class GenericExpertStore:
             store._mmap = mmap
             store._tmp_name = tmp_name
 
-            # Create RAMCache with auto-sized slots.
+            # Create FastExpertReader for pread-based SSD reads (bypasses mmap
+            # page fault overhead: single syscall per expert vs ~3300 4KB faults).
+            from .fast_io import FastExpertReader
             from .ram_cache import RAMCache as _RAMCache
+
+            expert_offsets: dict[tuple[int, int], int] = {}
+            for li in range(num_moe_layers):
+                for ei in range(num_experts):
+                    expert_offsets[(li, ei)] = (li * num_experts + ei) * layout.total_bytes
+            fast_reader = FastExpertReader(tmp_name, expert_offsets, layout.total_bytes)
 
             total_expert_slots = num_moe_layers * num_experts
             if ram_cache_gb > 0:
@@ -473,7 +481,11 @@ class GenericExpertStore:
                 # Target: hold ALL experts. The mmap data is on SSD, RAMCache
                 # acts as a fast pinned-memory mirror. After warmup, zero SSD reads.
                 num_slots = total_expert_slots
-            ram_cache = _RAMCache(num_slots=num_slots, expert_bytes=layout.total_bytes)
+            ram_cache = _RAMCache(
+                num_slots=num_slots,
+                expert_bytes=layout.total_bytes,
+                fast_reader=fast_reader,
+            )
 
             return store, num_experts, ram_cache
 
