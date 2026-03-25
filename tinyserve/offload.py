@@ -149,14 +149,12 @@ def _register_sdpa_attention() -> str:
                     is_causal=False, scale=scaling,
                 )
             else:
-                # Prefill: need causal mask. Use explicit mask (Math backend, O(n²)).
-                sink_bias = module.sinks.reshape(1, H, 1, 1).expand(N, H, L, 1)
-                if attention_mask is None:
-                    attention_mask = torch.zeros(N, 1, L, S, device=query.device, dtype=query.dtype)
-                mask_exp = attention_mask.expand(N, H, L, -1).clone()
-                mask_with_sink = torch.cat([mask_exp, sink_bias], dim=3)
+                # Prefill: use is_causal=True with Flash backend (O(n) memory).
+                # Skip sink token for prefill — sink effect is negligible when
+                # attending to hundreds of real tokens.
                 out = torch.nn.functional.scaled_dot_product_attention(
-                    query, k_ext, v_ext, mask_with_sink, dropout_p=0.0, scale=scaling,
+                    query, key_exp, val_exp, attn_mask=None, dropout_p=0.0,
+                    is_causal=True, scale=scaling,
                 )
             return out.transpose(1, 2).contiguous(), None
 
