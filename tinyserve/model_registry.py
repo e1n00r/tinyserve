@@ -111,4 +111,56 @@ def profile_from_config(config: PretrainedConfig) -> ModelProfile:
             num_layers=config.num_hidden_layers,
         )
 
+    if model_type == "llama4":
+        return ModelProfile(
+            moe_block_attr="feed_forward",
+            expert_list_attr="experts",
+            expert_layout=ExpertLayout(
+                weight_names=["gate_proj", "up_proj", "down_proj"],
+            ),
+            num_experts=config.num_local_experts,
+            num_experts_per_tok=config.num_experts_per_tok,
+            num_layers=config.num_hidden_layers,
+            shared_expert_attr="shared_expert",
+        )
+
+    if model_type == "kimi_k2":
+        return ModelProfile(
+            moe_block_attr="mlp",
+            expert_list_attr="experts",
+            expert_layout=ExpertLayout(
+                weight_names=["gate_proj", "up_proj", "down_proj"],
+            ),
+            num_experts=config.n_routed_experts,
+            num_experts_per_tok=config.num_experts_per_tok,
+            num_layers=config.num_hidden_layers,
+            first_moe_layer=config.first_k_dense_replace,
+            shared_expert_attr="shared_experts",
+        )
+
+    if model_type == "dbrx":
+        ffn_config = config.ffn_config
+        return ModelProfile(
+            moe_block_attr="ffn",
+            expert_list_attr="experts",
+            expert_layout=ExpertLayout(
+                weight_names=["w1", "v1", "w2"],
+            ),
+            num_experts=ffn_config.moe_num_experts,
+            num_experts_per_tok=ffn_config.moe_top_k,
+            num_layers=config.n_layers,
+        )
+
+    if model_type == "phimoe":
+        return ModelProfile(
+            moe_block_attr="block_sparse_moe",
+            expert_list_attr="experts",
+            expert_layout=ExpertLayout(
+                weight_names=["w1", "w2", "w3"],
+            ),
+            num_experts=config.num_local_experts,
+            num_experts_per_tok=config.num_experts_per_tok,
+            num_layers=config.num_hidden_layers,
+        )
+
     raise ValueError(f"Unsupported model type: {model_type}")

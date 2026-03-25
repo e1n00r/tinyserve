@@ -180,6 +180,10 @@ _ROUTING_MAP = {
     "olmoe": ("softmax_then_topk", True, "gate"),
     "qwen3_5_moe": ("router_native", False, "gate"),
     "qwen3_5_moe_text": ("router_native", False, "gate"),
+    "llama4": ("router_native", False, "gate"),
+    "kimi_k2": ("router_native", False, "gate"),
+    "dbrx": ("router_native", False, "gate"),
+    "phimoe": ("softmax_then_topk", False, "gate"),
 }
 
 

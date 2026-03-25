@@ -1,0 +1,20 @@
+services:
+  tinyserve:
+    build: .
+    image: ghcr.io/e1n00r/tinyserve:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - hf-cache:/cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  hf-cache:

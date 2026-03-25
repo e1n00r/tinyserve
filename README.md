@@ -89,6 +89,19 @@ curl -s http://localhost:8000/v1/chat/completions \
 
 Endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, `/metrics`. Supports streaming (SSE), request timeouts, concurrent request interleaving via GPU lock, and paged KV cache for multi-request memory sharing.
 
+### Docker
+
+```bash
+docker build -t tinyserve .
+docker run --gpus all -p 8000:8000 -v hf-cache:/cache/huggingface tinyserve
+```
+
+Or with docker compose (set `HF_TOKEN` for gated models):
+
+```bash
+HF_TOKEN=hf_... docker compose up
+```
+
 ## How it works
 
 1. **Expert store** — Expert weights are packed into flat byte buffers on pinned CPU memory. For MXFP4 models (GPT-OSS), weights are loaded directly from safetensors as raw uint8 blocks + scales, bypassing HF dequantization. For other models, weights are optionally compressed to FP8.
