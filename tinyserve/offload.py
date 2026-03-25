@@ -122,6 +122,45 @@ def _register_flex_attention() -> str:
         return "eager"
 
 
+def _register_sdpa_attention() -> str:
+    """Register SDPA with sink support. No torch.compile — zero VRAM overhead."""
+    try:
+        import transformers
+
+        def sdpa_attention_with_sinks(
+            module, query, key, value, attention_mask, scaling, dropout=0.0, sliding_window=None, **_
+        ):
+            N, H, L, E = query.shape
+            _, G, S, _ = key.shape
+            key_exp = key.repeat_interleave(H // G, dim=1)
+            val_exp = value.repeat_interleave(H // G, dim=1)
+            sink_k = torch.zeros(N, H, 1, E, device=key.device, dtype=key.dtype)
+            sink_v = torch.zeros(N, H, 1, E, device=value.device, dtype=value.dtype)
+            k_ext = torch.cat([key_exp, sink_k], dim=2)
+            v_ext = torch.cat([val_exp, sink_v], dim=2)
+            sink_bias = module.sinks.reshape(1, H, 1, 1).expand(N, H, L, 1)
+            if attention_mask is None:
+                attention_mask = torch.zeros(N, 1, L, S, device=query.device, dtype=query.dtype)
+            mask_exp = attention_mask.expand(N, H, L, -1).clone()
+            mask_with_sink = torch.cat([mask_exp, sink_bias], dim=3)
+            out = torch.nn.functional.scaled_dot_product_attention(
+                query, k_ext, v_ext, mask_with_sink, dropout_p=0.0, scale=scaling,
+            )
+            return out.transpose(1, 2).contiguous(), None
+
+        transformers.AttentionInterface.register("sdpa", sdpa_attention_with_sinks)
+        try:
+            transformers.AttentionMaskInterface.register("sdpa", transformers.masking_utils.eager_mask)
+        except Exception:
+            pass
+        gpt_oss_mod = getattr(transformers.models, "gpt_oss", None)
+        if gpt_oss_mod:
+            gpt_oss_mod.modeling_gpt_oss.GptOssPreTrainedModel._supports_sdpa = True
+        return "sdpa"
+    except Exception:
+        return "eager"
+
+
 _ROUTING_MAP = {
     "mixtral": ("router_native", False, "gate"),
     "qwen3_moe": ("router_native", False, "gate"),
@@ -314,6 +353,8 @@ def load_and_offload(
         attn_impl = attn_implementation
         if attn_impl == "flex":
             _register_flex_attention()
+        elif attn_impl == "sdpa":
+            _register_sdpa_attention()
     else:
         attn_impl = "eager"
         if flash_attention:
@@ -322,10 +363,8 @@ def load_and_offload(
 
                 attn_impl = "flash_attention_2"
             except ImportError:
-                pass
-                # FlexAttention requires static KV cache for efficient compilation.
-                # Enable via load_and_offload(attn_implementation='flex') when
-                # static KV cache is implemented.
+                # SDPA: fused kernel with O(n) memory, no torch.compile overhead.
+                attn_impl = _register_sdpa_attention()
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
