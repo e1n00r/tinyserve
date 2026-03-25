@@ -138,14 +138,26 @@ def _register_sdpa_attention() -> str:
             sink_v = torch.zeros(N, H, 1, E, device=value.device, dtype=value.dtype)
             k_ext = torch.cat([key_exp, sink_k], dim=2)
             v_ext = torch.cat([val_exp, sink_v], dim=2)
-            sink_bias = module.sinks.reshape(1, H, 1, 1).expand(N, H, L, 1)
-            if attention_mask is None:
-                attention_mask = torch.zeros(N, 1, L, S, device=query.device, dtype=query.dtype)
-            mask_exp = attention_mask.expand(N, H, L, -1).clone()
-            mask_with_sink = torch.cat([mask_exp, sink_bias], dim=3)
-            out = torch.nn.functional.scaled_dot_product_attention(
-                query, k_ext, v_ext, mask_with_sink, dropout_p=0.0, scale=scaling,
-            )
+
+            # For decode (L=1): skip the sink token and use Flash backend
+            # (O(n) memory, no attn_mask). The sink effect is small for decode
+            # since it competes with S real tokens in the softmax.
+            if L == 1:
+                # Flash backend: no attn_mask, is_causal=False (all positions valid for decode)
+                out = torch.nn.functional.scaled_dot_product_attention(
+                    query, key_exp, val_exp, attn_mask=None, dropout_p=0.0,
+                    is_causal=False, scale=scaling,
+                )
+            else:
+                # Prefill: need causal mask. Use explicit mask (Math backend, O(n²)).
+                sink_bias = module.sinks.reshape(1, H, 1, 1).expand(N, H, L, 1)
+                if attention_mask is None:
+                    attention_mask = torch.zeros(N, 1, L, S, device=query.device, dtype=query.dtype)
+                mask_exp = attention_mask.expand(N, H, L, -1).clone()
+                mask_with_sink = torch.cat([mask_exp, sink_bias], dim=3)
+                out = torch.nn.functional.scaled_dot_product_attention(
+                    query, k_ext, v_ext, mask_with_sink, dropout_p=0.0, scale=scaling,
+                )
             return out.transpose(1, 2).contiguous(), None
 
         transformers.AttentionInterface.register("sdpa", sdpa_attention_with_sinks)
