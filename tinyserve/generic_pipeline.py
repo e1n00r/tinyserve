@@ -328,7 +328,10 @@ class GenericExpertPipeline:
         self._param_refs = _precompute_param_refs(template, bf16_layout)
         self._act_fn = getattr(template, "_act_fn", None)
         # Inlined forward: baked-in offsets, no dict/getattr per call.
+        # For MXFP4 layouts, use GPU INT4 forward (~5x faster than BF16 F.linear).
         self._inline_fwd = _build_inline_forward(bf16_layout, self._act_fn)
+        if self._inline_fwd is None:
+            self._inline_fwd = _build_gpu_int4_forward(bf16_layout, self._act_fn)
         self.shared_stream = shared_stream if shared_stream is not None else torch.cuda.Stream(device)
         self._prefetch_stream = torch.cuda.Stream(device)
         self._prefetch_events: dict[int, torch.cuda.Event] = {}  # slot -> H2D-complete event
