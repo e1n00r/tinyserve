@@ -21,11 +21,20 @@ def cmd_run(args: argparse.Namespace) -> None:
     import torch
     from transformers import AutoTokenizer
 
-    from .offload import load_and_offload
+    gguf_path = getattr(args, "gguf", None)
 
-    print(f"Loading {args.model} ...")
-    model = load_and_offload(args.model)
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if gguf_path:
+        from .gguf_loader import load_from_gguf
+
+        print(f"Loading from GGUF: {gguf_path} ...")
+        model = load_from_gguf(gguf_path, model_id=args.model)
+        tokenizer = AutoTokenizer.from_pretrained(args.model)
+    else:
+        from .offload import load_and_offload
+
+        print(f"Loading {args.model} ...")
+        model = load_and_offload(args.model)
+        tokenizer = AutoTokenizer.from_pretrained(args.model)
     print("Ready. Type a prompt (Ctrl-D to quit).\n")
 
     while True:
@@ -76,10 +85,12 @@ def main() -> None:
 
     p_serve = sub.add_parser("serve", help="Start OpenAI-compatible HTTP server")
     p_serve.add_argument("--model", default="openai/gpt-oss-20b", help="HuggingFace model id or local path")
+    p_serve.add_argument("--gguf", default=None, help="Path to GGUF file (loads model from GGUF instead of HF)")
     p_serve.add_argument("--port", type=int, default=8000)
 
     p_run = sub.add_parser("run", help="Interactive generation REPL")
-    p_run.add_argument("--model", required=True, help="HuggingFace model id or local path")
+    p_run.add_argument("--model", required=True, help="HuggingFace model id (for tokenizer + config)")
+    p_run.add_argument("--gguf", default=None, help="Path to GGUF file (loads model from GGUF instead of HF)")
     p_run.add_argument("--max-tokens", type=int, default=100)
 
     p_info = sub.add_parser("info", help="Print model profile and expert layout")
