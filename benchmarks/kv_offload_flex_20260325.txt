@@ -1,0 +1,9 @@
+=== CPU KV + Flex + 120 expert slots ===
+experts=120, VRAM free=2624MB
+Compiling...
+OK
+   ctx  gen   tok/s   HR%
+------------------------------
+    10   20    3.5   74%
+   100  ERR: RuntimeError: No valid triton configs. OutOfMemoryError: out
+Done.

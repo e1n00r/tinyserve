@@ -1,0 +1,11 @@
+=== CPU KV Cache Benchmark ===
+experts=238, KV on cpu, max_seq=32768
+VRAM free: 967MB
+   ctx  gen   tok/s   HR%
+------------------------------
+    10   20    8.0   75%
+   100   20    3.0   92%
+   500   20    1.2   98%
+  1000   20    0.8   99%
+  2000  ERR: CUDA out of memory. Tried to allocate 490.00 MiB. 
+Done.
