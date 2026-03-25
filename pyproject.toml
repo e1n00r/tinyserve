@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinyserve"
+version = "0.1.0"
+description = "Run large MoE models exceeding VRAM via expert CPU offloading with GPU cache"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+    "torch>=2.6",
+    "transformers>=4.50",
+    "safetensors>=0.4",
+    "huggingface-hub>=0.25",
+    "numpy",
+]
+
+[project.optional-dependencies]
+gpu = ["triton>=3.4"]
+server = ["aiohttp>=3.9"]
+progress = ["tqdm>=4.60"]
+dev = ["pytest>=8.0", "ruff>=0.4", "pre-commit>=4.0", "aiohttp>=3.9", "tqdm>=4.60"]
+
+[project.scripts]
+tinyserve = "tinyserve.cli:main"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501", "E402", "SIM105", "SIM108", "SIM110", "SIM115", "SIM117", "SIM118", "B007", "B023", "B905"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tinyserve"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["requires_cuda: test needs NVIDIA GPU"]
+
+[tool.setuptools.packages.find]
+include = ["tinyserve*"]

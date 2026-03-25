@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.bin
+*.safetensors
+*.pt
+*.pth
+.env
+weights/
+downloads/
+.pytest_cache/
+docs/
+*.sh
