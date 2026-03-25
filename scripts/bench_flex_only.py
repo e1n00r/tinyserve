@@ -35,14 +35,14 @@ def main():
 
     tok = AutoTokenizer.from_pretrained("openai/gpt-oss-20b")
 
-    log("Loading model with FlexAttention + FP8 KV + max_seq_len=8192...")
+    log("Loading model with FlexAttention + FP8 KV + max_seq_len=4096...")
     try:
         model = load_and_offload(
             "openai/gpt-oss-20b",
             cache_capacity=0,
-            max_seq_len=8192,
+            max_seq_len=4096,
             kv_dtype=torch.float8_e4m3fn,
-            gpu_memory_utilization=0.90,
+            gpu_memory_utilization=0.80,
             attn_implementation="flex",
         )
     except Exception:
