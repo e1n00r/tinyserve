@@ -160,6 +160,88 @@ def run_benchmark(
     return result
 
 
+def run_context_scaling(
+    model_id: str = "openai/gpt-oss-20b",
+    contexts: list[int] | None = None,
+    gen_tokens: int = 20,
+    cache_policy: str = "lfru",
+    fp8: bool = True,
+    adaptive_fate: bool = True,
+    attn_implementation: str = "sdpa",
+) -> list[dict]:
+    """Benchmark with separated prefill and decode timing across context lengths."""
+    from transformers import AutoTokenizer
+
+    from tinyserve.offload import load_and_offload
+    from tinyserve.offloaded_model import reset_temporal_routing
+
+    if contexts is None:
+        contexts = [10, 50, 100, 500, 1000, 2000, 3000]
+
+    model = load_and_offload(
+        model_id,
+        device="cuda",
+        cache_policy=cache_policy,
+        fp8=fp8,
+        adaptive_fate=adaptive_fate,
+        attn_implementation=attn_implementation,
+    )
+    tok = AutoTokenizer.from_pretrained(model_id)
+    base_text = "The history of artificial intelligence. " * 500
+
+    # Warmup
+    inp = tok("Hello", return_tensors="pt").to("cuda")
+    with torch.inference_mode():
+        model.generate(**inp, max_new_tokens=3, do_sample=False)
+
+    results = []
+    for ctx in contexts:
+        reset_temporal_routing()
+        inp = tok(base_text, return_tensors="pt", truncation=True, max_length=ctx).to("cuda")
+        actual_ctx = inp["input_ids"].shape[1]
+
+        _reset_cache_stats(model)
+
+        # Time prefill
+        torch.cuda.synchronize()
+        t_prefill_start = time.perf_counter()
+        with torch.inference_mode():
+            out = model(**inp, use_cache=False)
+        torch.cuda.synchronize()
+        prefill_ms = (t_prefill_start - time.perf_counter()) * -1000
+
+        p_hits, p_misses = _collect_cache_stats(model)
+        _reset_cache_stats(model)
+
+        # Time decode
+        next_token = out.logits[:, -1:].argmax(dim=-1)
+        torch.cuda.synchronize()
+        t_decode_start = time.perf_counter()
+        for _ in range(gen_tokens):
+            with torch.inference_mode():
+                out = model(input_ids=next_token, use_cache=False)
+            next_token = out.logits[:, -1:].argmax(dim=-1)
+        torch.cuda.synchronize()
+        decode_ms = (time.perf_counter() - t_decode_start) * 1000
+
+        d_hits, d_misses = _collect_cache_stats(model)
+        d_total = d_hits + d_misses
+        decode_tps = gen_tokens / (decode_ms / 1000)
+        total_tps = gen_tokens / ((prefill_ms + decode_ms) / 1000)
+
+        results.append({
+            "ctx": actual_ctx,
+            "prefill_ms": round(prefill_ms, 1),
+            "decode_ms": round(decode_ms, 1),
+            "decode_tps": round(decode_tps, 1),
+            "total_tps": round(total_tps, 1),
+            "prefill_experts_loaded": p_hits + p_misses,
+            "decode_hit_rate": round(d_hits / max(1, d_total), 4),
+        })
+
+    return results
+
+
 def _swap_cache_policy(model, policy: str, device: str | torch.device = "cuda"):
     """Replace the cache policy on all pipelines without reloading the model.
 
@@ -495,6 +577,10 @@ def main():
     )
     parser.add_argument("--json", action="store_true")
     parser.add_argument(
+        "--context-scaling", action="store_true",
+        help="Benchmark prefill vs decode timing across context lengths"
+    )
+    parser.add_argument(
         "--both-families", action="store_true", help="Run GPT-OSS-20B then Qwen3.5-35B-A3B and print side-by-side"
     )
     parser.add_argument(
@@ -542,6 +628,31 @@ def main():
     # --capacity is a shorthand for --cache-capacity
     if args.capacity is not None and args.cache_capacity is None:
         args.cache_capacity = args.capacity
+
+    if args.context_scaling:
+        results = run_context_scaling(
+            model_id=args.model,
+            gen_tokens=args.measure if args.measure != 60 else 20,
+            cache_policy=args.cache_policy,
+            fp8=not args.no_fp8,
+            adaptive_fate=not args.no_adaptive_fate,
+        )
+        sep = "─" * 72
+        print(f"\nContext Scaling — {args.model}")
+        print(sep)
+        print(f"  {'ctx':>6}  {'prefill':>10}  {'decode':>10}  {'decode':>10}  {'total':>10}  {'decode':>8}")
+        print(f"  {'':>6}  {'(ms)':>10}  {'(ms)':>10}  {'(tok/s)':>10}  {'(tok/s)':>10}  {'HR%':>8}")
+        print(sep)
+        for r in results:
+            print(
+                f"  {r['ctx']:>6}  {r['prefill_ms']:>10.1f}  {r['decode_ms']:>10.1f}"
+                f"  {r['decode_tps']:>10.1f}  {r['total_tps']:>10.1f}"
+                f"  {r['decode_hit_rate'] * 100:>7.1f}%"
+            )
+        print(sep)
+        if args.json:
+            print(json.dumps(results, indent=2))
+        return
 
     if args.both_families:
         results = []
