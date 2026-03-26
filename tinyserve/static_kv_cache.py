@@ -94,14 +94,8 @@ class StaticKVCache:
 
     def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
         new_tokens = key_states.shape[2]
-        # Use cache_position if provided (HF passes it for correct placement).
-        if cache_kwargs and "cache_position" in cache_kwargs:
-            pos = cache_kwargs["cache_position"]
-            start = pos[0].item()
-            end = start + new_tokens
-        else:
-            start = self._seq_lens[layer_idx]
-            end = start + new_tokens
+        start = self._seq_lens[layer_idx]
+        end = start + new_tokens
         if end > self.max_seq_len:
             raise RuntimeError(
                 f"KV cache overflow: {end} > {self.max_seq_len}. Increase max_seq_len or reduce context."

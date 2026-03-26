@@ -640,16 +640,12 @@ class GenericLRUCache:
             return torch.full_like(expert_ids, -1, dtype=torch.int32)
         if layer_idx >= self._slot_map.shape[0]:
             return torch.full_like(expert_ids, -1, dtype=torch.int32)
-        # Clamp expert_ids to valid range — OOB indices get -1 (miss).
         ne = self._slot_map.shape[1]
         ids = expert_ids.long().to(self.device)
         safe = ids.clamp(max=ne - 1)
         result = self._slot_map[layer_idx, safe]
-        # Mark any clamped (OOB) indices as misses.
-        oob_mask = ids >= ne
-        if oob_mask.any():
-            result = result.clone()
-            result[oob_mask] = -1
+        result = torch.where(ids < ne, result,
+            torch.tensor(-1, dtype=torch.int32, device=self.device))
         return result
 
     def store_from_buffer(self, slot: int, buf: GenericExpertBuffer):

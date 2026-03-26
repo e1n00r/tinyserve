@@ -29,7 +29,7 @@ def chunked_prefill(model, input_ids, kv_cache, chunk_size=512):
     for start in range(0, seq_len, chunk_size):
         end = min(start + chunk_size, seq_len)
         chunk_ids = input_ids[:, start:end]
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = model(input_ids=chunk_ids, past_key_values=kv_cache)
     return outputs
 
@@ -68,7 +68,7 @@ def generate_chunked(
     generated = [next_token]
 
     for _ in range(max_new_tokens - 1):
-        with torch.no_grad():
+        with torch.inference_mode():
             out = model(input_ids=next_token, past_key_values=kv_cache)
         next_token = out.logits[:, -1:].argmax(dim=-1)
         generated.append(next_token)

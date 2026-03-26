@@ -91,9 +91,8 @@ def forward_from_packed(
     hidden_states: torch.Tensor,
 ) -> torch.Tensor:
     """Set template params to views of packed tensor — zero copy — then forward."""
-    with torch.no_grad():
-        for param, offset, nbytes, shape, dtype in param_refs:
-            param.data = packed[offset : offset + nbytes].view(dtype).view(shape)
+    for param, offset, nbytes, shape, dtype in param_refs:
+        param.data = packed[offset : offset + nbytes].view(dtype).view(shape)
     return template(hidden_states)
 
 
@@ -350,6 +349,7 @@ class GenericExpertPipeline:
         # not one per layer) since only one prefetch runs at a time during decode.
         # Set by OffloadedModel.from_module after construction.
         self._prefetch_fp8_stage: torch.Tensor | None = None
+        self._expert_output_buf: torch.Tensor | None = None
         # C++ expert loop: precomputed layout args + module handle.
         self._cpp_layout_args = _build_cpp_layout_args(bf16_layout, self._act_fn)
         self._cpp_ext = _get_expert_loop() if self._cpp_layout_args is not None else None
@@ -361,17 +361,20 @@ class GenericExpertPipeline:
         expert_indices: torch.Tensor,
         routing_weights: torch.Tensor,
     ) -> torch.Tensor:
-        expert_output = torch.zeros_like(hidden_states)
+        if self._expert_output_buf is None or self._expert_output_buf.shape != hidden_states.shape:
+            self._expert_output_buf = torch.zeros_like(hidden_states)
+        else:
+            self._expert_output_buf.zero_()
         for tok in range(hidden_states.shape[0]):
             self._execute_token_experts(
                 hidden_states[tok : tok + 1],
-                expert_output,
+                self._expert_output_buf,
                 tok,
                 layer_idx,
                 expert_indices[tok],
                 routing_weights[tok],
             )
-        return expert_output
+        return self._expert_output_buf.clone()
 
     def _execute_token_experts(
         self,

@@ -85,7 +85,7 @@ class InferenceEngine:
         """
         async with self._gpu_lock:
             next_tokens = []
-            with torch.no_grad():
+            with torch.inference_mode():
                 for req in requests:
                     token_input = torch.tensor(
                         [[req.generated[-1]]], device="cuda"
@@ -117,7 +117,7 @@ class InferenceEngine:
                 from .chunked import chunked_prefill
                 out = chunked_prefill(self.model, req.input_ids, req.kv_cache, self.chunk_size)
             else:
-                with torch.no_grad():
+                with torch.inference_mode():
                     out = self.model(input_ids=req.input_ids, past_key_values=req.kv_cache)
             next_token = out.logits[:, -1:].argmax(dim=-1)
             req.generated.append(next_token.item())
@@ -129,7 +129,7 @@ class InferenceEngine:
         # Decode loop
         for _ in range(max_tokens - 1):
             async with self._gpu_lock:
-                with torch.no_grad():
+                with torch.inference_mode():
                     out = self.model(input_ids=next_token, past_key_values=req.kv_cache)
                 next_token = out.logits[:, -1:].argmax(dim=-1)
                 token_id = next_token.item()

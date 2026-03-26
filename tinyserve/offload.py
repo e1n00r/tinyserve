@@ -132,38 +132,21 @@ def _register_sdpa_attention() -> str:
         ):
             N, H, L, E = query.shape
             _, G, S, _ = key.shape
-            key_exp = key.repeat_interleave(H // G, dim=1)
-            val_exp = value.repeat_interleave(H // G, dim=1)
-            sink_k = torch.zeros(N, H, 1, E, device=key.device, dtype=key.dtype)
-            sink_v = torch.zeros(N, H, 1, E, device=value.device, dtype=value.dtype)
-            k_ext = torch.cat([key_exp, sink_k], dim=2)
-            v_ext = torch.cat([val_exp, sink_v], dim=2)
 
-            # For decode (L=1): skip the sink token and use Flash backend
-            # (O(n) memory, no attn_mask). The sink effect is small for decode
-            # since it competes with S real tokens in the softmax.
             if L == 1:
-                # Sliding window optimization: only attend to the last
-                # `sliding_window` KV entries. Zero-cost slice keeps Flash
-                # backend (no attn_mask needed). GPT-OSS alternates
-                # full/sliding attention per layer (window=128).
-                k_decode = key_exp
-                v_decode = val_exp
+                k_decode = key
+                v_decode = value
                 if sliding_window is not None and S > sliding_window:
-                    k_decode = key_exp[:, :, -sliding_window:]
-                    v_decode = val_exp[:, :, -sliding_window:]
-                # SDPA Flash backend: no attn_mask, O(n) memory.
-                # SageAttention benchmarked but slower for batch=1 decode
-                # (INT8 quantization overhead > compute savings on tiny Q/K).
+                    k_decode = key[:, :, -sliding_window:]
+                    v_decode = value[:, :, -sliding_window:]
                 out = torch.nn.functional.scaled_dot_product_attention(
                     query, k_decode, v_decode, attn_mask=None, dropout_p=0.0,
-                    is_causal=False, scale=scaling,
+                    is_causal=False, scale=scaling, enable_gqa=True,
                 )
             else:
-                # Prefill: SDPA Flash with is_causal=True
                 out = torch.nn.functional.scaled_dot_product_attention(
-                    query, key_exp, val_exp, attn_mask=None, dropout_p=0.0,
-                    is_causal=True, scale=scaling,
+                    query, key, value, attn_mask=None, dropout_p=0.0,
+                    is_causal=True, scale=scaling, enable_gqa=True,
                 )
             return out.transpose(1, 2).contiguous(), None
 

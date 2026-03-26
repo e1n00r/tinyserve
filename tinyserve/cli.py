@@ -62,7 +62,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 eos_token_id=tokenizer.eos_token_id,
             )
         else:
-            with torch.no_grad():
+            with torch.inference_mode():
                 output = model.generate(input_ids, max_new_tokens=args.max_tokens)
         text = tokenizer.decode(output[0], skip_special_tokens=True)
         print(text)
