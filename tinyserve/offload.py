@@ -143,9 +143,18 @@ def _register_sdpa_attention() -> str:
             # (O(n) memory, no attn_mask). The sink effect is small for decode
             # since it competes with S real tokens in the softmax.
             if L == 1:
+                # Sliding window optimization: only attend to the last
+                # `sliding_window` KV entries. Zero-cost slice keeps Flash
+                # backend (no attn_mask needed). GPT-OSS alternates
+                # full/sliding attention per layer (window=128).
+                k_decode = key_exp
+                v_decode = val_exp
+                if sliding_window is not None and S > sliding_window:
+                    k_decode = key_exp[:, :, -sliding_window:]
+                    v_decode = val_exp[:, :, -sliding_window:]
                 # Flash backend: no attn_mask, is_causal=False (all positions valid for decode)
                 out = torch.nn.functional.scaled_dot_product_attention(
-                    query, key_exp, val_exp, attn_mask=None, dropout_p=0.0,
+                    query, k_decode, v_decode, attn_mask=None, dropout_p=0.0,
                     is_causal=False, scale=scaling,
                 )
             else:
