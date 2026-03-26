@@ -168,8 +168,14 @@ def run_context_scaling(
     fp8: bool = True,
     adaptive_fate: bool = True,
     attn_implementation: str = "sdpa",
+    static_kv: int = 0,
 ) -> list[dict]:
-    """Benchmark with separated prefill and decode timing across context lengths."""
+    """Benchmark with separated prefill and decode timing across context lengths.
+
+    Uses HF KV cache (DynamicCache by default) so decode tokens attend to
+    prior context.  With ``static_kv > 0`` a pre-allocated StaticKVCache is
+    used instead, eliminating per-step allocation overhead.
+    """
     from transformers import AutoTokenizer
 
     from tinyserve.offload import load_and_offload
@@ -202,13 +208,26 @@ def run_context_scaling(
 
         _reset_cache_stats(model)
 
+        # Build KV cache for this context length
+        if static_kv > 0:
+            from tinyserve.static_kv_cache import StaticKVCache
+            past_kv = StaticKVCache.from_model_config(
+                model.config, max_seq_len=static_kv, device="cuda",
+            )
+        else:
+            past_kv = None  # HF will create DynamicCache automatically
+
         # Time prefill
         torch.cuda.synchronize()
         t_prefill_start = time.perf_counter()
         with torch.inference_mode():
-            out = model(**inp, use_cache=False)
+            if past_kv is not None:
+                out = model(**inp, past_key_values=past_kv)
+            else:
+                out = model(**inp)
         torch.cuda.synchronize()
-        prefill_ms = (t_prefill_start - time.perf_counter()) * -1000
+        prefill_ms = (time.perf_counter() - t_prefill_start) * 1000
+        past_kv = out.past_key_values
 
         p_hits, p_misses = _collect_cache_stats(model)
         _reset_cache_stats(model)
@@ -219,7 +238,8 @@ def run_context_scaling(
         t_decode_start = time.perf_counter()
         for _ in range(gen_tokens):
             with torch.inference_mode():
-                out = model(input_ids=next_token, use_cache=False)
+                out = model(input_ids=next_token, past_key_values=past_kv)
+            past_kv = out.past_key_values
             next_token = out.logits[:, -1:].argmax(dim=-1)
         torch.cuda.synchronize()
         decode_ms = (time.perf_counter() - t_decode_start) * 1000
@@ -238,6 +258,9 @@ def run_context_scaling(
             "prefill_experts_loaded": p_hits + p_misses,
             "decode_hit_rate": round(d_hits / max(1, d_total), 4),
         })
+
+        # Free KV cache between context lengths to avoid OOM
+        del past_kv
 
     return results
 
@@ -623,6 +646,10 @@ def main():
     parser.add_argument(
         "--capacity", type=int, default=None, help="Alias for --cache-capacity (for profiling convenience)"
     )
+    parser.add_argument(
+        "--static-kv", type=int, default=0,
+        help="Pre-allocate StaticKVCache with this max_seq_len (0=use DynamicCache). Only for --context-scaling."
+    )
     args = parser.parse_args()
 
     # --capacity is a shorthand for --cache-capacity
@@ -636,6 +663,7 @@ def main():
             cache_policy=args.cache_policy,
             fp8=not args.no_fp8,
             adaptive_fate=not args.no_adaptive_fate,
+            static_kv=args.static_kv,
         )
         sep = "─" * 72
         print(f"\nContext Scaling — {args.model}")
