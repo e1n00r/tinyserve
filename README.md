@@ -4,7 +4,7 @@ Run Mixture-of-Experts models that don't fit in VRAM on a single NVIDIA GPU. Pur
 
 tinyserve offloads MoE expert weights to CPU RAM and caches hot experts on the GPU with predictive prefetch. A 20B MoE model (which only activates ~2B parameters per token) needs ~10 GB of CPU RAM and runs on 8 GB of VRAM.
 
-**Realistic expectations:** On an 8 GB laptop GPU, expect **1–4 tok/s for normal chat-length context** (100–500 tokens) and **7–10 tok/s on short prompts** with warm cache. This is 40–55× faster than HuggingFace `device_map="auto"` (0.19 tok/s) but slower than llama.cpp for models it supports.
+**Realistic expectations:** On an 8 GB laptop GPU, expect **2–7 tok/s for normal chat-length context** (100–500 tokens) and **15 tok/s on short prompts** with warm cache. This is 80× faster than HuggingFace `device_map="auto"` (0.19 tok/s) but slower than llama.cpp for models it supports.
 
 ## Who this is for
 
@@ -20,12 +20,13 @@ All numbers from an RTX PRO 2000 Blackwell 8 GB **laptop** GPU running GPT-OSS-2
 
 | Context length | tok/s | Cache hit rate | Source file |
 |---|---|---|---|
-| 10 tokens | 10.7 | 88% | `sdpa_cpu_kv_20260325.txt` |
-| 100 tokens | 4.5 | 98% | same |
-| 500 tokens | 1.4 | 99% | same |
-| 1,000 tokens | 0.8 | 100% | same |
-| 3,000 tokens | 0.3 | 100% | same |
-| Warm cache, 40-token gen | 7.7 | 64% | `debug_bench_zerodedup_20260325.txt` |
+| 10 tokens | 15.2 | 90% | `bench_micro_opt_20260326.txt` |
+| 50 tokens | 8.9 | 92% | same |
+| 100 tokens | 6.7 | 95% | same |
+| 500 tokens | 2.4 | 99% | same |
+| 1,000 tokens | 1.3 | 99% | same |
+| 2,000 tokens | 0.7 | 100% | same |
+| 3,000 tokens | 0.5 | 100% | same |
 
 **Baseline:** HuggingFace `device_map="auto"` on the same hardware: 0.19 tok/s.
 
@@ -141,7 +142,7 @@ HF_TOKEN=hf_... docker compose up
 
 **Weight formats:** HuggingFace safetensors (BF16, FP8, MXFP4). GGUF (Q4_K/Q5_K/Q6_K) loader implemented and unit-tested but not tested on real GGUF files.
 
-**Test suite:** 284 tests. CI runs on every push.
+**Test suite:** 318 tests. CI runs on every push.
 
 ## Configuration
 
