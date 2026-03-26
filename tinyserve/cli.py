@@ -46,8 +46,24 @@ def cmd_run(args: argparse.Namespace) -> None:
         if not prompt.strip():
             continue
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda")
-        with torch.no_grad():
-            output = model.generate(input_ids, max_new_tokens=args.max_tokens)
+        chunk_size = getattr(args, "chunk_size", 0)
+        if chunk_size > 0:
+            from .chunked import generate_chunked
+
+            kv_cache = getattr(model, "_kv_cache", None)
+            if kv_cache is not None:
+                kv_cache.reset()
+            output = generate_chunked(
+                model,
+                input_ids,
+                max_new_tokens=args.max_tokens,
+                kv_cache=kv_cache,
+                chunk_size=chunk_size,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+        else:
+            with torch.no_grad():
+                output = model.generate(input_ids, max_new_tokens=args.max_tokens)
         text = tokenizer.decode(output[0], skip_special_tokens=True)
         print(text)
         print()
@@ -92,6 +108,7 @@ def main() -> None:
     p_run.add_argument("--model", required=True, help="HuggingFace model id (for tokenizer + config)")
     p_run.add_argument("--gguf", default=None, help="Path to GGUF file (loads model from GGUF instead of HF)")
     p_run.add_argument("--max-tokens", type=int, default=100)
+    p_run.add_argument("--chunk-size", type=int, default=0, help="Prefill chunk size (0 = full prefill)")
 
     p_info = sub.add_parser("info", help="Print model profile and expert layout")
     p_info.add_argument("--model", required=True, help="HuggingFace model id or local path")

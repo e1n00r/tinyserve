@@ -54,11 +54,12 @@ class InferenceEngine:
     VRAM pool without per-request max_seq_len pre-allocation.
     """
 
-    def __init__(self, model, tokenizer, max_seq_len=4096, kv_dtype=torch.bfloat16, num_pages=0):
+    def __init__(self, model, tokenizer, max_seq_len=4096, kv_dtype=torch.bfloat16, num_pages=0, chunk_size=0):
         self.model = model
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.kv_dtype = kv_dtype
+        self.chunk_size = chunk_size
         self._gpu_lock = asyncio.Lock()
         self._config = model.config
         effective = getattr(self._config, "text_config", self._config)
@@ -110,10 +111,14 @@ class InferenceEngine:
             start_time=time.perf_counter(),
         )
 
-        # Prefill
+        # Prefill (chunked if chunk_size > 0 to avoid O(n^2) OOM)
         async with self._gpu_lock:
-            with torch.no_grad():
-                out = self.model(input_ids=req.input_ids, past_key_values=req.kv_cache)
+            if self.chunk_size > 0:
+                from .chunked import chunked_prefill
+                out = chunked_prefill(self.model, req.input_ids, req.kv_cache, self.chunk_size)
+            else:
+                with torch.no_grad():
+                    out = self.model(input_ids=req.input_ids, past_key_values=req.kv_cache)
             next_token = out.logits[:, -1:].argmax(dim=-1)
             req.generated.append(next_token.item())
             req.prefill_done = True
@@ -466,6 +471,7 @@ def main():
     parser.add_argument("--max-concurrent", type=int, default=4)
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--max-pending", type=int, default=32)
+    parser.add_argument("--chunk-size", type=int, default=0, help="Prefill chunk size (0 = full prefill)")
     args = parser.parse_args()
 
     from .offload import load_and_offload
@@ -478,7 +484,7 @@ def main():
         max_seq_len=args.max_seq_len, kv_dtype=kv_dtype,
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    engine = InferenceEngine(model, tokenizer, args.max_seq_len, kv_dtype)
+    engine = InferenceEngine(model, tokenizer, args.max_seq_len, kv_dtype, chunk_size=args.chunk_size)
 
     model_name = args.model.split("/")[-1] if "/" in args.model else args.model
 
