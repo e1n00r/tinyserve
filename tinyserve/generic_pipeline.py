@@ -209,7 +209,13 @@ def _build_gpu_int4_forward(layout, act_fn):
     fwd = GPUINT4Forward(layout, group_size=32, act_fn=act_fn)
 
     def _forward(packed, h):
-        return fwd.forward(h, packed)
+        try:
+            return fwd.forward(h, packed)
+        except torch.cuda.OutOfMemoryError:
+            # Not enough VRAM for INT4 conversion — fall back to template forward
+            fwd._int4_cache.clear()
+            torch.cuda.empty_cache()
+            return None  # caller falls back to forward_from_packed
 
     return _forward
 
@@ -467,9 +473,10 @@ class GenericExpertPipeline:
                 if slot in self._prefetch_events:
                     torch.cuda.current_stream().wait_event(self._prefetch_events.pop(slot))
                 packed = cache.get_packed(slot)
+                out = None
                 if _inline is not None:
                     out = _inline(packed, h)
-                else:
+                if out is None:
                     out = forward_from_packed(self.template, packed, self._param_refs, h)
                 output[tok_idx] += weights[i] * out.squeeze(0)
 
