@@ -1,0 +1,131 @@
+MXFP4 quantization requires Triton and kernels installed: CUDA requires Triton >= 3.4.0, XPU requires Triton >= 3.5.0, we will default to dequantizing the model to bf16
+Loading openai/gpt-oss-20b...
+Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards:  33%|███▎      | 1/3 [00:15<00:31, 15.54s/it]Loading checkpoint shards:  67%|██████▋   | 2/3 [00:31<00:15, 15.53s/it]Loading checkpoint shards: 100%|██████████| 3/3 [00:38<00:00, 11.69s/it]Loading checkpoint shards: 100%|██████████| 3/3 [00:38<00:00, 12.72s/it]
+Fetching 17 files:   0%|          | 0/17 [00:00<?, ?it/s]Fetching 17 files: 100%|██████████| 17/17 [00:00<00:00, 8922.93it/s]
+Cache: 238 slots, policy=lru
+Model: 24 layers x 32 experts, top_k=4, 238 slots = 31% coverage
+
+=== Phase 1: Cold Start (diverse first prompts) ===
+  Write a Python function that i...   HR=84.3%  7.5 tok/s
+  Explain the proof of Fermat's ...   HR=86.0%  7.5 tok/s
+  The rain drummed against the w...   HR=89.8%  8.3 tok/s
+  Опишите принцип работы квантов...   HR=92.2%  8.7 tok/s
+  请解释量子纠缠的基本原理。...                    HR=91.5%  8.8 tok/s
+  What are the main causes and e...   HR=89.5%  8.1 tok/s
+  Derive the Euler-Lagrange equa...   HR=81.8%  6.9 tok/s
+  Write a haiku about a programm...   HR=91.5%  9.0 tok/s
+
+=== Phase 2: Sustained code (4 prompts, 30 tok each) ===
+  Prompt 1/4: HR=85.5%  7.0 tok/s  (2704h/457m)
+  Prompt 2/4: HR=87.9%  7.6 tok/s  (2732h/377m)
+  Prompt 3/4: HR=86.1%  7.8 tok/s  (2685h/435m)
+  Prompt 4/4: HR=86.3%  7.8 tok/s  (2661h/422m)
+  Overall: HR=86.4%
+
+=== Phase 2: Sustained math (4 prompts, 30 tok each) ===
+  Prompt 1/4: HR=84.8%  7.1 tok/s  (2675h/478m)
+  Prompt 2/4: HR=85.1%  7.6 tok/s  (2637h/463m)
+  Prompt 3/4: HR=87.2%  7.8 tok/s  (2709h/396m)
+  Prompt 4/4: HR=86.5%  8.0 tok/s  (2668h/418m)
+  Overall: HR=85.9%
+
+=== Phase 2: Sustained creative (4 prompts, 30 tok each) ===
+  Prompt 1/4: HR=90.7%  8.1 tok/s  (2810h/289m)
+  Prompt 2/4: HR=90.3%  9.0 tok/s  (2764h/296m)
+  Prompt 3/4: HR=86.8%  6.1 tok/s  (2686h/407m)
+  Prompt 4/4: HR=86.7%  7.9 tok/s  (2695h/414m)
+  Overall: HR=88.6%
+
+=== Phase 2: Sustained multilingual (4 prompts, 30 tok each) ===
+  Prompt 1/4: HR=90.4%  8.5 tok/s  (2744h/292m)
+  Prompt 2/4: HR=93.8%  9.0 tok/s  (2836h/188m)
+  Prompt 3/4: HR=92.4%  8.5 tok/s  (2789h/231m)
+  Prompt 4/4: HR=90.7%  8.2 tok/s  (2785h/285m)
+  Overall: HR=91.8%
+
+=== Phase 2: Sustained conversation (4 prompts, 30 tok each) ===
+  Prompt 1/4: HR=77.4%  6.8 tok/s  (2399h/701m)
+  Prompt 2/4: HR=88.2%  7.1 tok/s  (2748h/367m)
+  Prompt 3/4: HR=83.6%  6.9 tok/s  (2632h/517m)
+  Prompt 4/4: HR=85.5%  7.8 tok/s  (2645h/448m)
+  Overall: HR=83.7%
+
+=== Phase 3: Domain Shift (code -> creative) ===
+  Warmup (code): HR=86.4%
+  Shift  (creative): HR=90.3%
+  Delta: +3.9%
+
+=== Phase 3: Domain Shift (math -> conversation) ===
+  Warmup (math): HR=84.9%
+  Shift  (conversation): HR=83.0%
+  Delta: -2.0%
+
+=== Phase 3: Domain Shift (code -> multilingual) ===
+  Warmup (code): HR=86.6%
+  Shift  (multilingual): HR=91.6%
+  Delta: +4.9%
+
+=== Phase 3: Domain Shift (creative -> math) ===
+  Warmup (creative): HR=90.4%
+  Shift  (math): HR=84.9%
+  Delta: -5.4%
+
+=== Phase 3: Domain Shift (multilingual -> code) ===
+  Warmup (multilingual): HR=92.2%
+  Shift  (code): HR=86.4%
+  Delta: -5.8%
+
+=== Phase 4: Per-Layer Hit Rate Analysis ===
+   Layer     HR%  bar
+     ---     ---  ------------------------------
+       0  40.0%  ############
+       1  37.0%  ###########
+       2  35.8%  ##########
+       3  30.4%  #########
+       4  41.1%  ############
+       5  35.3%  ##########
+       6  36.7%  ###########
+       7  32.8%  #########
+       8  37.0%  ###########
+       9  28.3%  ########
+      10  38.9%  ###########
+      11  20.4%  ######
+      12  32.3%  #########
+      13  17.4%  #####
+      14  17.9%  #####
+      15  22.9%  ######
+      16  11.4%  ###
+      17  11.4%  ###
+      18   6.2%  #
+      19  10.3%  ###
+      20   6.7%  ##
+      21   0.0%  
+      22   0.0%  
+      23   0.0%  
+
+  Worst 5: L21=0.0%, L22=0.0%, L23=0.0%, L18=6.2%, L20=6.7%
+  Best  5: L4=41.1%, L0=40.0%, L10=38.9%, L1=37.0%, L8=37.0%
+
+=== Phase 5: Expert Frequency Distribution ===
+  Total expert accesses: 3690
+  Unique experts accessed: 581/768 (75.7%)
+  Never accessed: 187
+  Top 10% of experts handle 18.9% of accesses
+  Top 25% of experts handle 45.1% of accesses
+
+============================================================
+SUMMARY
+============================================================
+  Cold start HR: 81.8% - 92.2% (mean 88.3%)
+  Sustained code: HR=86.4%
+  Sustained math: HR=85.9%
+  Sustained creative: HR=88.6%
+  Sustained multilingual: HR=91.8%
+  Sustained conversation: HR=83.7%
+  Shift code->creative: 90.3% (delta +3.9%)
+  Shift math->conversation: 83.0% (delta -2.0%)
+  Shift code->multilingual: 91.6% (delta +5.0%)
+  Shift creative->math: 84.9% (delta -5.5%)
+  Shift multilingual->code: 86.4% (delta -5.8%)
+
+Results saved to benchmarks/cache_benchmark_20260326.json

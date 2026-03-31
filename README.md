@@ -1,252 +1,170 @@
 # tinyserve — MoE Expert Offloading for Consumer GPUs
 
-Run Mixture-of-Experts models that don't fit in VRAM on a single NVIDIA GPU. Pure Python, no C++ compilation.
+Run Mixture-of-Experts models that don't fit in VRAM on a single NVIDIA GPU.
 
-tinyserve offloads MoE expert weights to CPU RAM and caches hot experts on the GPU with predictive prefetch. A 20B MoE model (which only activates ~2B parameters per token) needs ~10 GB of CPU RAM and runs on 8 GB of VRAM.
+tinyserve offloads MoE expert weights to CPU RAM and caches hot experts on GPU. A 20B MoE model needs ~10 GB CPU RAM and runs on 8 GB VRAM.
 
-**Realistic expectations:** On an 8 GB laptop GPU, expect **5–10 tok/s for normal chat** (100–500 tokens) and **~30 tok/s decode** with warm cache. This is 160× faster than HuggingFace `device_map="auto"` (0.19 tok/s) but slower than llama.cpp for models it supports.
-
-## Who this is for
-
-A new MoE model drops on HuggingFace. There's no GGUF quantization yet. Ollama can't load it. You have a laptop with an 8 GB GPU and you want to try it *today*, not next week when someone posts a GGUF.
-
-tinyserve loads directly from HuggingFace safetensors. If the model is on the Hub and uses a standard MoE architecture, you can probably run it.
-
-**If your model already works in Ollama or llama.cpp, use those.** Their C++ inference loop is faster. tinyserve is for models they don't support yet, or for when you want to read and modify the inference code yourself (~3K lines of Python, no compiled extensions).
+**If your model works in Ollama or llama.cpp, use those.** Their C++ loop is faster. tinyserve is for models they don't support yet, or when you want readable Python (~7K LOC, no compiled extensions).
 
 ## Performance (measured)
 
-All numbers from an RTX PRO 2000 Blackwell 8 GB **laptop** GPU running GPT-OSS-20B (MXFP4, 238 expert cache slots). Raw benchmark logs in [`benchmarks/`](benchmarks/).
+All numbers from RTX PRO 2000 8 GB **laptop** GPU, GPT-OSS-20B (MXFP4, 238 cache slots, 24 layers × 32 experts, top_k=4). Raw logs in [`benchmarks/`](benchmarks/).
 
-### Decode speed (tokens generated per second)
+### Cache hit rates (diverse workloads)
 
-Decode speed is **constant** regardless of context length — the expert cache stays warm after prefill.
+Measured with industry-standard methodology: diverse prompts across 5 domains, cold start, domain shifts. NOT measured on warm cache with repeated text.
 
-| Context length | Decode tok/s | Cache hit rate | Source file |
+| Workload | Hit rate | tok/s | Source |
 |---|---|---|---|
-| 10 tokens | 28.8 | 97% | `batched_prefill_20260326.txt` |
-| 50 tokens | 29.7 | 99% | same |
-| 100 tokens | 32.2 | 100% | same |
-| 500 tokens | 30.6 | 100% | same |
-| 1,000 tokens | 30.0 | 100% | same |
-| 2,000 tokens | 27.2 | 99% | same |
+| Cold start (8 diverse prompts) | 82-92% | 7-9 | `cache_benchmark_20260326.json` |
+| Sustained code | 86% | 7-8 | same |
+| Sustained math | 86% | 7-8 | same |
+| Sustained creative | 89% | 6-9 | same |
+| Sustained multilingual | 92% | 8-9 | same |
+| Sustained conversation | 84% | 7-8 | same |
+| Domain shift (creative→math) | 85% (-5.4%) | — | same |
+| Domain shift (multilingual→code) | 86% (-5.8%) | — | same |
 
-### End-to-end speed (prefill + decode combined)
+### Per-layer hit rate
 
-Total throughput including prompt processing. Prefill time grows linearly with context; decode speed stays constant.
+Cache slots are consumed disproportionately by early layers, starving deeper layers:
 
-| Context length | Prefill time | Total tok/s | Source file |
+| Layers | Hit rate | Note |
+|---|---|---|
+| 0-10 | 28-41% | Early layers get most cache budget |
+| 11-17 | 11-32% | Middle layers partially served |
+| 18-23 | 0-10% | Deep layers nearly always miss |
+
+This is with 238 slots across 768 total experts (31% coverage). The per-layer distribution is the primary optimization target.
+
+### Decode speed (post-prefill)
+
+When cache is warm from prefill of the SAME prompt, decode speed is ~30 tok/s and constant across context lengths. This represents the ceiling, not typical workload performance.
+
+| Context | Decode tok/s | Post-prefill HR | Source |
 |---|---|---|---|
-| 10 tokens | 1.1s | 11.4 | `batched_prefill_20260326.txt` |
-| 100 tokens | 1.8s | 8.4 | same |
-| 500 tokens | 2.5s | 6.3 | same |
-| 1,000 tokens | 3.2s | 5.2 | same |
-| 2,000 tokens | 4.3s | 4.0 | same |
+| 10 | 28.8 | 97% | `batched_prefill_20260326.txt` |
+| 100 | 32.2 | 100% | same |
+| 1,000 | 30.0 | 100% | same |
+| 2,000 | 27.2 | 99% | same |
 
-**Baseline:** HuggingFace `device_map="auto"` on the same hardware: 0.19 tok/s.
+### End-to-end (prefill + decode)
 
-**Why total throughput drops with context:** Prefill processes all input tokens through expert layers. With batched expert prefill, each expert is loaded once per layer (not once per token), but prefill still takes 1-4 seconds for long prompts. Once prefill completes, decode runs at a constant ~30 tok/s regardless of context length.
+| Context | Prefill | Total tok/s |
+|---|---|---|
+| 10 | 1.1s | 11.4 |
+| 100 | 1.8s | 8.4 |
+| 500 | 2.5s | 6.3 |
+| 1,000 | 3.2s | 5.2 |
 
-**RTX PRO 2000 vs RTX 4060 8 GB:** Both are 8 GB cards. The 4060 desktop has higher memory bandwidth (272 vs ~256 GB/s). Expect similar or slightly better numbers. If you benchmark, please open an issue with results.
+**Baseline:** HuggingFace `device_map="auto"`: 0.19 tok/s.
 
-**What we have NOT measured:**
-- No Ollama or llama.cpp comparison on the same GPU (those tools don't support GPT-OSS-20B natively)
-- Only GPT-OSS-20B has been benchmarked end-to-end
-- GGUF Q4_K loader passes unit tests but has not been tested on real model files
+### What we have NOT measured
+
+- No Ollama/llama.cpp comparison on same GPU (they don't support GPT-OSS-20B)
+- Only GPT-OSS-20B benchmarked end-to-end
+- GGUF Q4_K loader unit-tested only — not tested on real GGUF files
+- No multi-user / batch inference benchmarks
+- No H100/A100 numbers — all data is from an 8 GB laptop GPU
 
 ## Quick start
 
 ```bash
 git clone https://github.com/e1n00r/tinyserve.git
 cd tinyserve
-pip install -e "."            # or: pip install -e ".[server]" for HTTP serving
+pip install -e "."
 ```
-
-> **Note:** On Ubuntu 24.04+, use a venv (`python3 -m venv .venv && source .venv/bin/activate`) or add `--break-system-packages`.
 
 ```python
 from tinyserve import load_and_offload
 
 model = load_and_offload("openai/gpt-oss-20b")
-# That's it — generates like any HF model
 output = model.generate(input_ids, max_new_tokens=100)
-```
-
-For models already loaded via HuggingFace:
-
-```python
-from tinyserve import offload_model
-
-model = offload_model(hf_model, device="cuda")
 ```
 
 ### CLI
 
 ```bash
-# Start OpenAI-compatible HTTP server
-tinyserve serve --model openai/gpt-oss-20b --port 8000
-
-# Interactive generation REPL
-tinyserve run --model openai/gpt-oss-20b
-
-# Print model profile (expert layout, routing, sizes)
-tinyserve info --model openai/gpt-oss-20b
+tinyserve serve --model openai/gpt-oss-20b --port 8000   # OpenAI-compatible HTTP
+tinyserve run --model openai/gpt-oss-20b                  # Interactive REPL
+tinyserve info --model openai/gpt-oss-20b                 # Model profile
 ```
-
-All commands are also available via `python -m tinyserve <command>`.
-
-### Serving (OpenAI-compatible API)
-
-```bash
-pip install -e ".[server]"
-tinyserve serve --model openai/gpt-oss-20b --port 8000
-```
-
-```bash
-curl -s http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Hello"}],"max_tokens":50,"stream":true}'
-```
-
-Endpoints: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, `/metrics`. Supports streaming (SSE), request timeouts, concurrent request interleaving via GPU lock, and paged KV cache for multi-request memory sharing.
 
 ### Docker
 
 ```bash
 docker build -t tinyserve .
-docker run --gpus all -p 8000:8000 -v hf-cache:/cache/huggingface tinyserve
-```
-
-Or with docker compose (set `HF_TOKEN` for gated models):
-
-```bash
-HF_TOKEN=hf_... docker compose up
+docker run --gpus all -p 8000:8000 tinyserve
 ```
 
 ## How it works
 
-1. **Expert store** — Expert weights are packed into flat byte buffers on pinned CPU memory. For MXFP4 models (GPT-OSS), weights are loaded directly from safetensors as raw uint8 blocks + scales, bypassing HF dequantization. For other models, weights are optionally compressed to FP8.
-
-2. **GPU LRU cache** — A pre-allocated VRAM tensor holds `capacity` expert slots. On a cache hit, the template module's parameters are set to views of the cache slot (zero-copy). On a miss, the double-buffered pipeline loads from CPU.
-
-3. **Double-buffered H2D pipeline** — Two GPU buffers alternate: while expert _i_ runs its forward pass on the compute stream, expert _i+1_ is being DMA'd from CPU on the transfer stream.
-
-4. **FATE cross-layer prefetch** — Adjacent MoE layers have high gate input cosine similarity. After layer _N_ finishes, its hidden states predict layer _N+1_'s expert selection. Those experts are prefetched on a dedicated stream, overlapping with attention compute.
-
-5. **Adaptive temporal fallback** — After the first token, the system reuses the previous token's routing decisions. Temporal locality matches or exceeds FATE accuracy and eliminates gate computation cost.
-
-6. **Paged KV cache** — Multiple concurrent requests share a pool of fixed-size KV pages (256 tokens/page), enabling memory-efficient multi-request serving without per-request pre-allocation.
+1. **Expert store** — Weights packed as flat byte buffers in pinned CPU memory. MXFP4 loaded as raw uint8 blocks + scales from safetensors (no dequantization).
+2. **GPU LRU cache** — Pre-allocated VRAM tensor. Hit: template params set to cache slot views (zero-copy). Miss: double-buffered H2D pipeline.
+3. **FATE cross-layer prefetch** — Current layer's hidden states predict next layer's experts. Prefetch overlaps with attention compute.
+4. **Temporal routing fallback** — After first token, reuse previous token's routing. Matches or exceeds FATE accuracy.
+5. **Batched expert prefill** — Groups tokens by expert, loads each once. Reduces prefill expert loads from O(seq_len × top_k) to O(num_experts).
 
 ## Supported models
 
-| Model family | Size | RAM needed (est.) | Fits 64 GB RAM? | Status |
-|---|---|---|---|---|
-| GPT-OSS-20B | 20B (MXFP4) | ~10 GB | Yes | **Benchmarked** |
-| Qwen 3.5 MoE 35B | 35B | ~18 GB | Yes | Unit tested |
-| Mixtral 8x7B | 47B | ~24 GB | Yes | Unit tested |
-| GPT-OSS-120B | 120B | ~60 GB | Tight | Profile exists |
-| Mixtral 8x22B | 141B | ~70 GB | No (128 GB+) | Unit tested |
-| Qwen 3.5 MoE 397B | 397B | ~200 GB | No (workstation) | Unit tested |
-| DeepSeek-V3/R1 | 671B | ~350 GB | No (server) | Unit tested |
-| Llama 4, Kimi K2, OLMoE, DBRX, Phi-MoE | various | varies | varies | Profile exists |
+| Model | Params | RAM needed | Status |
+|---|---|---|---|
+| GPT-OSS-20B | 20B (MXFP4) | ~10 GB | **Benchmarked** |
+| Qwen 3.5 MoE 35B | 35B | ~18 GB | Unit tested |
+| Mixtral 8x7B | 47B | ~24 GB | Unit tested |
+| GPT-OSS-120B | 120B | ~60 GB | Profile only |
+| DeepSeek-V3/R1 | 671B | ~350 GB | Profile only |
+| + 6 more families | varies | varies | Profile only |
 
-**Status levels:**
-- **Benchmarked:** Real weights loaded, tokens generated, throughput measured.
-- **Unit tested:** Offloading pipeline runs on mocked weights shaped like that architecture. Real weights NOT loaded.
-- **Profile exists:** Model registry has architecture metadata. No code run for that model.
+**Status:** "Benchmarked" = real weights loaded, tokens generated, throughput measured. "Unit tested" = pipeline runs on mock weights. "Profile only" = architecture metadata exists, no code run.
 
-**Weight formats:** HuggingFace safetensors (BF16, FP8, MXFP4). GGUF (Q4_K/Q5_K/Q6_K) loader implemented and unit-tested but not tested on real GGUF files.
-
-**Test suite:** 318 tests. CI runs on every push.
+**Formats:** HuggingFace safetensors (BF16, FP8, MXFP4). GGUF (Q4_K/Q5_K/Q6_K) unit-tested.
 
 ## Configuration
 
 ```python
-from tinyserve import load_and_offload
-
 model = load_and_offload(
     "openai/gpt-oss-20b",
-    cache_capacity=0,              # 0 = auto-size from available VRAM
+    cache_capacity=0,              # 0 = auto-size from VRAM
     cache_policy="lfru",           # lru, lfru, slru, lfu, fifo, ls, dali
-    max_seq_len=4096,              # pre-allocate static KV cache (0 = use HF DynamicCache)
-    kv_dtype=torch.bfloat16,       # torch.float8_e4m3fn for 2x context
-    gpu_memory_utilization=0.90,   # fraction of GPU VRAM to use (like vLLM)
-    attn_implementation="eager",   # or "flex" for FlexAttention (opt-in)
+    max_seq_len=4096,              # static KV cache (0 = dynamic)
+    gpu_memory_utilization=0.90,
 )
 ```
 
-**Expert cache vs KV cache trade-off** (GPT-OSS-20B, 8 GB, BF16 KV):
-
-| Context | KV Cache | Expert Slots | Trade-off |
-|---------|----------|-------------|-----------|
-| 0 (no KV) | 0 MB | 321 | Max throughput |
-| 4K | 201 MB | 306 | Balanced |
-| 16K | 805 MB | 260 | Long context |
-| 32K | 1.6 GB | 200 | Very long |
-| 64K | 3.2 GB | 78 | Max context |
-
-Use `--kv-fp8` for FP8 KV cache (halves KV memory, doubles max context).
-
-## Hardware requirements
-
-**GPU:**
-- NVIDIA GPUs only (hardcoded CUDA streams, Triton PTX)
-- AMD ROCm / Intel XPU / Apple MPS: not supported
-- Minimum: SM 7.0 (V100, RTX 2060) for BF16 path
-- Recommended: SM 8.0+ (A100, RTX 3090) for MXFP4 Triton kernels
-- Best: SM 8.9+ (RTX 4090, RTX PRO) for FP8 KV cache + compute
-- VRAM: 8 GB minimum, more VRAM = more expert cache slots + longer context
-
-**System:**
-- RAM: must fit all expert weights (GPT-OSS-20B: ~10 GB pinned, DeepSeek-V3: ~350 GB)
-- Python 3.11+, PyTorch 2.6+, Transformers 4.50+
-
-## Key techniques
-
-- **Native MXFP4 expert store** — loads quantized blocks + scales directly from safetensors. 4x smaller than BF16. Supports Triton `dot_scaled` kernels.
-- **GPU-side FP8 to BF16 dequant** — H2D transfers raw FP8 bytes (half BF16 size), GPU kernel dequantizes into cache slot.
-- **Event-based stream sync** — CUDA events coordinate transfer, compute, and prefetch streams without CPU blocking.
-- **FATE cross-layer prefetch** ([arxiv 2502.12224](https://arxiv.org/abs/2502.12224)) — structural prediction using next layer's gate on current hidden states.
-- **DALI workload-aware cache** ([arxiv 2602.03495](https://arxiv.org/abs/2602.03495)) — sliding-window frequency tracking with hot/cold tiers.
-- **Zero-copy cache hits** — template `.data` set to cache slot views. No buffer copy on hot path.
-- **GPU slot map** — tensor-indexed cache lookup avoids CUDA sync on the cache-hit path.
-
 ## Limitations
 
-- **NVIDIA only** — hardcoded CUDA streams and Triton PTX. No AMD/Intel/Apple support.
-- **Single GPU** — no multi-GPU or tensor parallelism.
-- **Context scaling** — decode throughput drops linearly with context length due to attention cost (not expert offload). FlexAttention with static KV shapes is available (`attn_implementation="flex"` + `max_seq_len=N`) — eliminates torch.compile recompilation by using constant-shape tensors with masking.
-- **Prefill speed** — prefill is attention-dominated, not improved by expert caching.
-- **FlashAttention** — GPT-OSS uses custom attention sinks incompatible with standard FA2/SDPA. FlexAttention with sinks is available but requires torch.compile warmup.
-- **Correctness** — expert weight swapping uses a single template module. This is correct for batch_size=1 decode but not for true batched inference where different tokens need different experts simultaneously.
+- NVIDIA only (CUDA streams, Triton PTX)
+- Single GPU only
+- Batch size 1 decode only (template weight swapping is not batch-safe)
+- Deep layers (18-23) have near-zero cache hit rates at 238 slots
+- Prefill is attention-dominated, not improved by expert caching
+- GGUF loader not tested on real files
+
+## Benchmarking
+
+```bash
+# Industry-standard diverse workload benchmark
+python -m scripts.cache_benchmark --model openai/gpt-oss-20b
+
+# Decode speed benchmark
+python scripts/benchmark.py --model openai/gpt-oss-20b
+
+# Context scaling (prefill vs decode separated)
+python scripts/benchmark.py --context-scaling
+
+# Cache policy comparison
+python scripts/benchmark.py --compare-policies
+
+# FATE prediction accuracy
+python scripts/benchmark.py --fate-diagnostic
+```
 
 ## Testing
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest tests/ --ignore=tests/test_hf_models.py -x -q  # 194+ tests
-```
-
-## Benchmarking
-
-```bash
-# Standard decode benchmark
-python scripts/benchmark.py --model openai/gpt-oss-20b --measure 40
-
-# Compare cache policies
-python scripts/benchmark.py --compare-policies
-
-# FATE prediction accuracy per layer
-python scripts/benchmark.py --fate-diagnostic
-
-# Analytical Pareto frontier (instant, no GPU)
-python scripts/autotune.py --model openai/gpt-oss-20b
-
-# CPU profiler
-python scripts/benchmark.py --profile
-
-# CUDA trace
-python scripts/benchmark.py --trace
+python -m pytest tests/ --ignore=tests/test_hf_models.py -x -q   # 330 tests
 ```
 
 ## License
