@@ -195,6 +195,57 @@ def _build_inline_forward(layout, act_fn):
     return _forward
 
 
+def _build_mxfp4_inline_forward(layout, act_fn):
+    """Build an inline forward for MXFP4 layouts using dot_scaled_vecmat.
+
+    Eliminates forward_from_packed's param.data rebinding loop for MXFP4
+    cache hits. Returns (packed, hidden) -> output callable.
+    """
+    specs = layout.specs
+    if "gate_up_proj_scales" not in specs:
+        return None
+
+    gu_off = layout.offsets["gate_up_proj"]
+    gu_sz = layout.sizes["gate_up_proj"]
+    gu_shape = specs["gate_up_proj"][0]
+    gs_off = layout.offsets["gate_up_proj_scales"]
+    gs_sz = layout.sizes["gate_up_proj_scales"]
+    gs_shape = specs["gate_up_proj_scales"][0]
+    dn_off = layout.offsets["down_proj"]
+    dn_sz = layout.sizes["down_proj"]
+    dn_shape = specs["down_proj"][0]
+    ds_off = layout.offsets["down_proj_scales"]
+    ds_sz = layout.sizes["down_proj_scales"]
+    ds_shape = specs["down_proj_scales"][0]
+
+    from .offloaded_model import _mxfp4_linear
+
+    if act_fn is not None:
+        def _forward(packed, h):
+            w_gu = packed[gu_off:gu_off + gu_sz].view(torch.uint8).view(gu_shape)
+            s_gu = packed[gs_off:gs_off + gs_sz].view(torch.uint8).view(gs_shape)
+            gate_up = _mxfp4_linear(h, w_gu, s_gu)
+            gate, up = gate_up.chunk(2, dim=-1)
+            gated = act_fn(gate) * up
+            w_dn = packed[dn_off:dn_off + dn_sz].view(torch.uint8).view(dn_shape)
+            s_dn = packed[ds_off:ds_off + ds_sz].view(torch.uint8).view(ds_shape)
+            return _mxfp4_linear(gated, w_dn, s_dn)
+    else:
+        # GPT-OSS custom SwiGLU (interleaved, not chunked)
+        def _forward(packed, h):
+            w_gu = packed[gu_off:gu_off + gu_sz].view(torch.uint8).view(gu_shape)
+            s_gu = packed[gs_off:gs_off + gs_sz].view(torch.uint8).view(gs_shape)
+            gate_up = _mxfp4_linear(h, w_gu, s_gu)
+            gate = gate_up[..., ::2].clamp(max=7.0)
+            up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
+            gated = (up + 1) * gate * torch.sigmoid(gate * 1.702)
+            w_dn = packed[dn_off:dn_off + dn_sz].view(torch.uint8).view(dn_shape)
+            s_dn = packed[ds_off:ds_off + ds_sz].view(torch.uint8).view(ds_shape)
+            return _mxfp4_linear(gated, w_dn, s_dn)
+
+    return _forward
+
+
 def _build_gpu_int4_forward(layout, act_fn):
     """Build a GPU INT4 forward for MXFP4 layouts.
 
@@ -351,8 +402,11 @@ class GenericExpertPipeline:
         self._param_refs = _precompute_param_refs(template, bf16_layout)
         self._act_fn = getattr(template, "_act_fn", None)
         # Inlined forward: baked-in offsets, no dict/getattr per call.
-        # For MXFP4 layouts, use GPU INT4 forward (~5x faster than BF16 F.linear).
+        # For MXFP4 layouts, use MXFP4 inline forward (direct dot_scaled_vecmat,
+        # no param.data rebinding). GPU INT4 disabled on 8GB GPUs.
         self._inline_fwd = _build_inline_forward(bf16_layout, self._act_fn)
+        if self._inline_fwd is None:
+            self._inline_fwd = _build_mxfp4_inline_forward(bf16_layout, self._act_fn)
         if self._inline_fwd is None:
             self._inline_fwd = _build_gpu_int4_forward(bf16_layout, self._act_fn)
         self.shared_stream = shared_stream if shared_stream is not None else torch.cuda.Stream(device)
@@ -458,6 +512,8 @@ class GenericExpertPipeline:
             for i, (tok_idx, k) in enumerate(zip(tok_indices, weight_indices)):
                 output[tok_idx] += routing_weights[tok_idx, k] * out_batch[i]
 
+        if cache is not None and hasattr(cache, "flush_slot_updates"):
+            cache.flush_slot_updates()
         return output
 
     def _execute_token_experts(
@@ -570,6 +626,8 @@ class GenericExpertPipeline:
                 _args["activation"],
             )
             output[tok_idx] += out.squeeze(0)
+            if cache is not None and hasattr(cache, "flush_slot_updates"):
+                cache.flush_slot_updates()
             return
 
         for i, slot in hits:
@@ -585,6 +643,8 @@ class GenericExpertPipeline:
                 output[tok_idx] += weights[i] * out.squeeze(0)
 
         if not misses:
+            if cache is not None and hasattr(cache, "flush_slot_updates"):
+                cache.flush_slot_updates()
             return
 
         # Fiddler (arxiv 2402.07033): at batch=1, route ALL misses through CPU compute.
@@ -623,6 +683,8 @@ class GenericExpertPipeline:
                 if cache is not None:
                     gpu_slot = cache.allocate(layer_idx, eid)
                     cache.get_packed(gpu_slot).copy_(expert_packed[:cache.expert_bytes], non_blocking=True)
+            if cache is not None and hasattr(cache, "flush_slot_updates"):
+                cache.flush_slot_updates()
             return
 
         # Split misses: RAM-cached experts go to GPU pipeline (fast H2D from pinned),
@@ -649,6 +711,8 @@ class GenericExpertPipeline:
                         gpu_slot = cache.allocate(layer_idx, eid)
                         cache.get_packed(gpu_slot).copy_(ram.get_slot_data(ram.lookup(layer_idx, eid)), non_blocking=True)
             if not cold_misses:
+                if cache is not None and hasattr(cache, "flush_slot_updates"):
+                    cache.flush_slot_updates()
                 return
             misses = cold_misses
 
@@ -656,6 +720,8 @@ class GenericExpertPipeline:
         _evt = torch.cuda.Event()
         _evt.record(self.compute_stream)
         torch.cuda.current_stream().wait_event(_evt)
+        if cache is not None and hasattr(cache, "flush_slot_updates"):
+            cache.flush_slot_updates()
 
     def _pipeline_experts(
         self,
