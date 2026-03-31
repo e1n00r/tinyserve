@@ -74,7 +74,7 @@ def _create_synthetic_gguf(path, n_layers=2, n_experts=4, ggml_type=0):
 
     with open(path, "wb") as f:
         # Header
-        f.write(struct.pack("<I", 0x46475547))  # magic "GGUF"
+        f.write(struct.pack("<I", 0x46554747))  # magic "GGUF"
         f.write(struct.pack("<I", 3))  # version 3
         f.write(struct.pack("<Q", n_tensors))
         f.write(struct.pack("<Q", n_kv))
@@ -286,7 +286,7 @@ class TestGGUFMetadataTypes:
     def test_float32_metadata(self, tmp_path):
         path = tmp_path / "meta.gguf"
         with open(path, "wb") as f:
-            f.write(struct.pack("<I", 0x46475547))  # magic
+            f.write(struct.pack("<I", 0x46554747))  # magic
             f.write(struct.pack("<I", 3))  # version
             f.write(struct.pack("<Q", 0))  # n_tensors
             f.write(struct.pack("<Q", 1))  # n_kv
@@ -300,7 +300,7 @@ class TestGGUFMetadataTypes:
     def test_bool_metadata(self, tmp_path):
         path = tmp_path / "meta.gguf"
         with open(path, "wb") as f:
-            f.write(struct.pack("<I", 0x46475547))
+            f.write(struct.pack("<I", 0x46554747))
             f.write(struct.pack("<I", 3))
             f.write(struct.pack("<Q", 0))
             f.write(struct.pack("<Q", 1))
@@ -316,7 +316,7 @@ class TestGGUFMetadataTypes:
     def test_uint64_metadata(self, tmp_path):
         path = tmp_path / "meta.gguf"
         with open(path, "wb") as f:
-            f.write(struct.pack("<I", 0x46475547))
+            f.write(struct.pack("<I", 0x46554747))
             f.write(struct.pack("<I", 3))
             f.write(struct.pack("<Q", 0))
             f.write(struct.pack("<Q", 1))
@@ -327,6 +327,102 @@ class TestGGUFMetadataTypes:
 
         reader = GGUFReader(path)
         assert reader.metadata["test.big_number"] == 2**40
+        reader.close()
+
+
+def _create_fused_expert_gguf(path, n_layers=2, n_experts=4, expert_ffn_size=16, hidden_size=32):
+    """Create a minimal GGUF v3 file with fused expert tensors (Qwen3.5 style).
+
+    Tensor naming: blk.<L>.ffn_{gate,up,down}_exps.weight
+    Shape: (hidden_size, expert_ffn_size, n_experts) for gate/up
+            (expert_ffn_size, hidden_size, n_experts) for down
+    All F32 (type=0) for simplicity.
+    """
+    projections = [
+        ("gate", (hidden_size, expert_ffn_size, n_experts)),
+        ("up", (hidden_size, expert_ffn_size, n_experts)),
+        ("down", (expert_ffn_size, hidden_size, n_experts)),
+    ]
+
+    tensors = []
+    for layer in range(n_layers):
+        for proj, shape in projections:
+            name = f"blk.{layer}.ffn_{proj}_exps.weight"
+            n_elements = 1
+            for d in shape:
+                n_elements *= d
+            tensors.append((name, shape, 0, n_elements * 4))  # F32
+
+    n_tensors = len(tensors)
+    n_kv = 1
+
+    data_offset = 0
+    offsets = []
+    for _, _, _, nbytes in tensors:
+        offsets.append(data_offset)
+        data_offset += nbytes
+
+    with open(path, "wb") as f:
+        f.write(struct.pack("<I", 0x46554747))  # magic
+        f.write(struct.pack("<I", 3))            # version
+        f.write(struct.pack("<Q", n_tensors))
+        f.write(struct.pack("<Q", n_kv))
+
+        _write_string(f, "general.name")
+        f.write(struct.pack("<I", 8))
+        _write_string(f, "fused-test")
+
+        for (name, shape, ggml_type, _), offset in zip(tensors, offsets):
+            _write_string(f, name)
+            f.write(struct.pack("<I", len(shape)))
+            for d in shape:
+                f.write(struct.pack("<Q", d))
+            f.write(struct.pack("<I", ggml_type))
+            f.write(struct.pack("<Q", offset))
+
+        pos = f.tell()
+        aligned = (pos + 31) & ~31
+        f.write(b"\x00" * (aligned - pos))
+
+        for _, _, _, nbytes in tensors:
+            f.write(b"\x00" * nbytes)
+
+
+class TestGGUFReaderFusedExperts:
+    def test_fused_expert_grouping(self, tmp_path):
+        path = tmp_path / "fused.gguf"
+        _create_fused_expert_gguf(path, n_layers=2)
+
+        reader = GGUFReader(path)
+        groups = reader.list_fused_expert_tensors()
+
+        assert len(groups) == 2
+        assert 0 in groups
+        assert 1 in groups
+        assert set(groups[0].keys()) == {"gate", "up", "down"}
+        assert set(groups[1].keys()) == {"gate", "up", "down"}
+        reader.close()
+
+    def test_fused_expert_tensor_info_shape(self, tmp_path):
+        path = tmp_path / "fused.gguf"
+        _create_fused_expert_gguf(path, n_layers=1, n_experts=8, expert_ffn_size=16, hidden_size=32)
+
+        reader = GGUFReader(path)
+        groups = reader.list_fused_expert_tensors()
+
+        gate_info = groups[0]["gate"]
+        assert isinstance(gate_info, GGUFTensorInfo)
+        assert gate_info.shape == (32, 16, 8)
+        assert gate_info.ggml_type_name == "F32"
+        reader.close()
+
+    def test_list_expert_tensors_empty_for_fused_format(self, tmp_path):
+        path = tmp_path / "fused.gguf"
+        _create_fused_expert_gguf(path, n_layers=2)
+
+        reader = GGUFReader(path)
+        per_expert = reader.list_expert_tensors()
+        assert len(per_expert) == 0
         reader.close()
 
 

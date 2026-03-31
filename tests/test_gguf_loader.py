@@ -77,7 +77,7 @@ def _create_gguf_with_metadata(path, metadata: dict, tensors: list[dict] | None 
         tensor_offset += len(t["data"])
 
     with open(path, "wb") as f:
-        f.write(struct.pack("<I", 0x46475547))  # magic
+        f.write(struct.pack("<I", 0x46554747))  # magic
         f.write(struct.pack("<I", 3))  # version
         f.write(struct.pack("<Q", n_tensors))
         f.write(struct.pack("<Q", n_kv))
@@ -617,3 +617,92 @@ class TestGGUFModelConfig:
         assert cfg.arch == "qwen3moe"
         assert cfg.num_hidden_layers == 64
         assert cfg.num_experts == 128
+
+    def test_num_local_experts_alias(self):
+        cfg = GGUFModelConfig(num_experts=256)
+        assert cfg.num_local_experts == 256
+
+    def test_num_local_experts_alias_default(self):
+        cfg = GGUFModelConfig()
+        assert cfg.num_local_experts == 0
+
+
+class TestMultiShardFusedExperts:
+    def _create_fused_shard(self, path, shard_num, total_shards, layers, n_experts=4, ffn_size=8, hidden=16):
+        shard_name = f"model-{shard_num:05d}-of-{total_shards:05d}.gguf"
+        shard_path = path / shard_name
+        projections = [("gate", (hidden, ffn_size, n_experts)),
+                       ("up", (hidden, ffn_size, n_experts)),
+                       ("down", (ffn_size, hidden, n_experts))]
+
+        tensors = []
+        for layer in layers:
+            for proj, shape in projections:
+                name = f"blk.{layer}.ffn_{proj}_exps.weight"
+                n_el = 1
+                for d in shape:
+                    n_el *= d
+                data = _make_f32_tensor_data(shape)
+                tensors.append({"name": name, "shape": shape, "ggml_type": 0, "data": data})
+        _create_gguf_with_metadata(shard_path, {"general.architecture": "test"}, tensors)
+        return shard_path
+
+    def test_fused_expert_discovery_across_shards(self, tmp_path):
+        self._create_fused_shard(tmp_path, 1, 2, layers=[0, 1])
+        self._create_fused_shard(tmp_path, 2, 2, layers=[2, 3])
+
+        first = tmp_path / "model-00001-of-00002.gguf"
+        reader = open_gguf(str(first))
+        assert isinstance(reader, MultiShardGGUFReader)
+
+        groups = reader.list_fused_expert_tensors()
+        assert len(groups) == 4
+        for layer in range(4):
+            assert layer in groups
+            assert set(groups[layer].keys()) == {"gate", "up", "down"}
+        reader.close()
+
+    def test_fused_expert_shape_across_shards(self, tmp_path):
+        self._create_fused_shard(tmp_path, 1, 2, layers=[0], n_experts=8, ffn_size=16, hidden=32)
+        self._create_fused_shard(tmp_path, 2, 2, layers=[1], n_experts=8, ffn_size=16, hidden=32)
+
+        first = tmp_path / "model-00001-of-00002.gguf"
+        reader = open_gguf(str(first))
+        groups = reader.list_fused_expert_tensors()
+
+        gate_info = groups[0]["gate"]
+        assert gate_info.shape == (32, 16, 8)
+        reader.close()
+
+    def test_list_expert_tensors_empty_when_only_fused(self, tmp_path):
+        self._create_fused_shard(tmp_path, 1, 2, layers=[0])
+        self._create_fused_shard(tmp_path, 2, 2, layers=[1])
+
+        first = tmp_path / "model-00001-of-00002.gguf"
+        reader = open_gguf(str(first))
+        per_expert = reader.list_expert_tensors()
+        assert len(per_expert) == 0
+        reader.close()
+
+
+class TestQwen35MoeMetadata:
+    def test_qwen35moe_arch_prefix(self):
+        metadata = {
+            "general.architecture": "qwen35moe",
+            "qwen35moe.block_count": 48,
+            "qwen35moe.embedding_length": 3072,
+            "qwen35moe.expert_count": 256,
+            "qwen35moe.expert_used_count": 8,
+            "qwen35moe.context_length": 262144,
+            "qwen35moe.rope.freq_base": 10000000.0,
+            "tokenizer.ggml.tokens": ["a"] * 248320,
+        }
+        cfg = config_from_metadata(metadata)
+        assert cfg.arch == "qwen35moe"
+        assert cfg.num_hidden_layers == 48
+        assert cfg.hidden_size == 3072
+        assert cfg.num_experts == 256
+        assert cfg.num_local_experts == 256
+        assert cfg.num_experts_per_tok == 8
+        assert cfg.context_length == 262144
+        assert cfg.vocab_size == 248320

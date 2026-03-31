@@ -159,7 +159,12 @@ class GGUFReader:
         return self._file.read(info.nbytes)
 
     def list_expert_tensors(self) -> dict[tuple[int, int], dict[str, GGUFTensorInfo]]:
-        """Group expert tensors by (layer, expert_idx)."""
+        """Group per-expert tensors by (layer, expert_idx).
+
+        Matches the per-expert naming convention: ``blk.<L>.ffn_<proj>.<E>.weight``.
+        For fused expert tensors (``blk.<L>.ffn_<proj>_exps.weight``), use
+        ``list_fused_expert_tensors()`` instead.
+        """
         pattern = re.compile(r"blk\.(\d+)\.ffn_(gate|up|down)\.(\d+)\.weight")
         groups: dict[tuple[int, int], dict[str, GGUFTensorInfo]] = {}
         for t in self._tensors:
@@ -170,6 +175,30 @@ class GGUFReader:
                 if key not in groups:
                     groups[key] = {}
                 groups[key][proj] = t
+        return groups
+
+    def list_fused_expert_tensors(self) -> dict[int, dict[str, GGUFTensorInfo]]:
+        """Group fused expert tensors by layer index.
+
+        Matches the fused naming convention used by Qwen3.5 and similar models:
+        ``blk.<L>.ffn_gate_exps.weight``, ``blk.<L>.ffn_up_exps.weight``,
+        ``blk.<L>.ffn_down_exps.weight``.
+
+        The tensors have shape ``(out_dim, in_dim, n_experts)`` where experts
+        are stacked in the last dimension.
+
+        Returns:
+            Dict mapping layer index to ``{"gate": info, "up": info, "down": info}``.
+        """
+        pattern = re.compile(r"blk\.(\d+)\.ffn_(gate|up|down)_exps\.weight")
+        groups: dict[int, dict[str, GGUFTensorInfo]] = {}
+        for t in self._tensors:
+            m = pattern.match(t.name)
+            if m:
+                layer, proj = int(m.group(1)), m.group(2)
+                if layer not in groups:
+                    groups[layer] = {}
+                groups[layer][proj] = t
         return groups
 
     @property

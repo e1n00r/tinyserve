@@ -40,6 +40,11 @@ class GGUFModelConfig:
     context_length: int = 4096
     extra: dict = field(default_factory=dict)
 
+    @property
+    def num_local_experts(self) -> int:
+        """Alias for num_experts (compatibility with HF config naming)."""
+        return self.num_experts
+
 
 # GGUF metadata key -> GGUFModelConfig field. The arch prefix (e.g.
 # "qwen3moe.") is stripped before matching.
@@ -265,7 +270,11 @@ class MultiShardGGUFReader:
         return reader.get_tensor_data(entry.info)
 
     def list_expert_tensors(self) -> dict[tuple[int, int], dict[str, GGUFTensorInfo]]:
-        """Group expert tensors by (layer, expert_idx) across all shards."""
+        """Group per-expert tensors by (layer, expert_idx) across all shards.
+
+        Matches ``blk.<L>.ffn_<proj>.<E>.weight``. For fused expert tensors
+        (``blk.<L>.ffn_<proj>_exps.weight``), use ``list_fused_expert_tensors()``.
+        """
         groups: dict[tuple[int, int], dict[str, GGUFTensorInfo]] = {}
         for name, entry in self._tensor_map.items():
             m = _EXPERT_RE.match(name)
@@ -275,6 +284,27 @@ class MultiShardGGUFReader:
                 if key not in groups:
                     groups[key] = {}
                 groups[key][proj] = entry.info
+        return groups
+
+    def list_fused_expert_tensors(self) -> dict[int, dict[str, GGUFTensorInfo]]:
+        """Group fused expert tensors by layer index across all shards.
+
+        Matches ``blk.<L>.ffn_gate_exps.weight``, ``blk.<L>.ffn_up_exps.weight``,
+        ``blk.<L>.ffn_down_exps.weight``. The tensors have shape
+        ``(out_dim, in_dim, n_experts)`` with experts in the last dimension.
+
+        Returns:
+            Dict mapping layer index to ``{"gate": info, "up": info, "down": info}``.
+        """
+        fused_re = re.compile(r"^blk\.(\d+)\.ffn_(gate|up|down)_exps\.weight$")
+        groups: dict[int, dict[str, GGUFTensorInfo]] = {}
+        for name, entry in self._tensor_map.items():
+            m = fused_re.match(name)
+            if m:
+                layer, proj = int(m.group(1)), m.group(2)
+                if layer not in groups:
+                    groups[layer] = {}
+                groups[layer][proj] = entry.info
         return groups
 
     def close(self):
