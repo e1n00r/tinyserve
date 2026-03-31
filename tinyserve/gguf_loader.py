@@ -405,6 +405,125 @@ def _dequant_tensor(
     )
 
 
+def _dequant_fused_tensor(
+    reader: GGUFReader | MultiShardGGUFReader,
+    info: GGUFTensorInfo,
+    name: str,
+    device: str | torch.device,
+) -> torch.Tensor:
+    """Dequantize a fused 3-D GGUF expert tensor to BF16.
+
+    Fused expert tensors have shape ``(out_dim, in_dim, n_experts)``.  Q4_K
+    quantisation applies to the flat element buffer, so we dequant into a 2-D
+    array of ``n_elements`` elements and then reshape.
+    """
+    import numpy as np
+
+    if isinstance(reader, MultiShardGGUFReader):
+        raw = reader.get_tensor_data(name)
+    else:
+        raw = reader.get_tensor_data(info)
+
+    ggml_type = info.ggml_type
+    shape_3d = tuple(info.shape)  # (out_dim, in_dim, n_experts)
+    n_elements = 1
+    for d in shape_3d:
+        n_elements *= d
+
+    if ggml_type == 0:  # F32
+        t = torch.frombuffer(bytearray(raw), dtype=torch.float32).reshape(shape_3d)
+        return t.to(torch.bfloat16).to(device)
+
+    if ggml_type == 1:  # F16
+        t = torch.frombuffer(bytearray(raw), dtype=torch.float16).reshape(shape_3d)
+        return t.to(torch.bfloat16).to(device)
+
+    if ggml_type == 14:  # Q4_K — 256-element blocks, 144 bytes each
+        from .gguf_quant import parse_q4k_block
+
+        n_blocks = n_elements // 256
+        values = np.empty(n_elements, dtype=np.float32)
+        for b in range(n_blocks):
+            block = raw[b * 144:(b + 1) * 144]
+            vals, _, _ = parse_q4k_block(block)
+            values[b * 256:(b + 1) * 256] = vals
+        t = torch.from_numpy(values.reshape(shape_3d))
+        return t.to(torch.bfloat16).to(device)
+
+    if ggml_type == 8:  # Q8_0 — 34 bytes per block of 32 elements
+        n_blocks = n_elements // 32
+        values = np.empty(n_elements, dtype=np.float32)
+        for b in range(n_blocks):
+            block = raw[b * 34:(b + 1) * 34]
+            scale = np.frombuffer(block[:2], dtype=np.float16).astype(np.float32)[0]
+            quants = np.frombuffer(block[2:34], dtype=np.int8).astype(np.float32)
+            values[b * 32:(b + 1) * 32] = scale * quants
+        t = torch.from_numpy(values.reshape(shape_3d))
+        return t.to(torch.bfloat16).to(device)
+
+    raise ValueError(
+        f"Unsupported GGML type {ggml_type} ({GGML_TYPES.get(ggml_type, ('UNKNOWN',))[0]}) "
+        f"for fused expert tensor '{name}'. Only F32, F16, Q4_K, Q8_0 are supported."
+    )
+
+
+def _build_expert_store_from_fused_reader(
+    reader: GGUFReader | MultiShardGGUFReader,
+    num_layers: int,
+    num_experts: int,
+    device: str | torch.device,
+) -> "GenericExpertStore | None":
+    """Build a GenericExpertStore from fused expert tensors (Qwen 3.5 style).
+
+    Fused expert tensors store all experts in a single tensor per projection:
+    ``blk.<L>.ffn_gate_exps.weight`` with shape ``(out_dim, in_dim, n_experts)``.
+
+    This function dequants one layer at a time (memory-efficient) and slices
+    per expert, then packs into a ``GenericExpertStore``.
+
+    Returns ``None`` when no fused expert tensors are present.
+    """
+    from .generic_store import GenericExpertStore
+
+    fused_layers = reader.list_fused_expert_tensors()
+    if not fused_layers:
+        return None
+
+    layers = sorted(fused_layers.keys())
+    expert_weights: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
+
+    for layer_idx in layers:
+        layer_tensors = fused_layers[layer_idx]
+
+        gate_name = f"blk.{layer_idx}.ffn_gate_exps.weight"
+        up_name = f"blk.{layer_idx}.ffn_up_exps.weight"
+        down_name = f"blk.{layer_idx}.ffn_down_exps.weight"
+
+        # Dequant full fused tensors on CPU first (shape: [out, in, n_experts])
+        gate_bf16 = _dequant_fused_tensor(reader, layer_tensors["gate"], gate_name, "cpu")
+        up_bf16 = _dequant_fused_tensor(reader, layer_tensors["up"], up_name, "cpu")
+        down_bf16 = _dequant_fused_tensor(reader, layer_tensors["down"], down_name, "cpu")
+
+        n_exp = gate_bf16.shape[2]
+
+        for expert_idx in range(n_exp):
+            gate_e = gate_bf16[:, :, expert_idx]  # [intermediate, hidden]
+            up_e = up_bf16[:, :, expert_idx]      # [intermediate, hidden]
+            down_e = down_bf16[:, :, expert_idx]  # [hidden, intermediate]
+
+            gate_up = torch.cat([gate_e, up_e], dim=0)  # [2*intermediate, hidden]
+
+            expert_weights[(layer_idx, expert_idx)] = {
+                "gate_up_proj": gate_up.to(torch.bfloat16),
+                "down_proj": down_e.to(torch.bfloat16),
+            }
+
+        # Release fused tensors immediately to bound peak RAM
+        del gate_bf16, up_bf16, down_bf16
+
+    return GenericExpertStore.from_dict(expert_weights, num_layers, num_experts)
+
+
 # ---------------------------------------------------------------------------
 # Main loader
 # ---------------------------------------------------------------------------
@@ -482,10 +601,29 @@ def load_from_gguf(
     else:
         all_names = [t.name for t in reader.tensors]
 
+    # Collect fused expert tensor names upfront so they are excluded from the
+    # non-expert loading pass (they would fail shape validation against the
+    # shared_expert param they incorrectly map to via gguf_to_hf_name).
+    _fused_expert_re = re.compile(r"^blk\.\d+\.ffn_(gate|up|down)_exps\.weight$")
+
+    def _is_fused_expert(n: str) -> bool:
+        if not _fused_expert_re.match(n):
+            return False
+        # Only 3-D tensors are fused-expert tensors; 2-D ones are shared experts.
+        if is_multi:
+            info = reader.get_tensor_info(n)
+        else:
+            info = _find_tensor_info(reader, n)
+        return len(info.shape) == 3
+
+    fused_expert_names: set[str] = {n for n in all_names if _is_fused_expert(n)}
+
     expert_names: list[str] = []
     non_expert_names: list[str] = []
 
     for name in all_names:
+        if name in fused_expert_names:
+            continue  # handled separately via _build_expert_store_from_fused_reader
         _, is_expert, _, _ = gguf_to_hf_name(name)
         if is_expert:
             expert_names.append(name)
@@ -538,24 +676,42 @@ def load_from_gguf(
 
     logger.info("Loaded %d non-expert weights, skipped %d", loaded, skipped)
 
-    # Step 5: Expert weights -> GGUFExpertStore
+    # Step 5: Expert weights -> expert store
     from .gguf_store import GGUFExpertStore
 
-    if is_multi:
-        expert_groups = reader.list_expert_tensors()
-    else:
-        expert_groups = reader.list_expert_tensors()
+    expert_groups = reader.list_expert_tensors()
 
     if expert_groups:
         store = _build_expert_store_from_reader(reader, expert_groups, is_multi)
         logger.info(
-            "Expert store: %d layers, %d experts, %.2f MB/expert",
+            "Expert store (per-expert): %d layers, %d experts, %.2f MB/expert",
             store.num_layers,
             store.num_experts,
             store.expert_bytes / 1e6,
         )
     else:
         store = None
+
+    if store is None and fused_expert_names:
+        logger.info(
+            "No per-expert tensors found; attempting fused expert tensor slicing (%d fused tensors)",
+            len(fused_expert_names),
+        )
+        store = _build_expert_store_from_fused_reader(
+            reader,
+            num_layers=gguf_cfg.num_hidden_layers,
+            num_experts=gguf_cfg.num_experts,
+            device=device,
+        )
+        if store is not None:
+            logger.info(
+                "Expert store (fused): %d layers, %d experts, %.2f MB/expert",
+                store.num_layers,
+                store.num_experts,
+                store.expert_bytes / 1e6,
+            )
+
+    if store is None:
         logger.warning("No expert tensors found in GGUF — model has no MoE layers?")
 
     reader.close()

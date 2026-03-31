@@ -13,6 +13,8 @@ from tinyserve.gguf_loader import (
     gguf_to_hf_name,
     hf_to_gguf_name,
     open_gguf,
+    _build_expert_store_from_fused_reader,
+    _dequant_fused_tensor,
     _dequant_tensor,
     _find_tensor_info,
     _get_param,
@@ -682,6 +684,177 @@ class TestMultiShardFusedExperts:
         reader = open_gguf(str(first))
         per_expert = reader.list_expert_tensors()
         assert len(per_expert) == 0
+        reader.close()
+
+
+class TestDequantFusedTensor:
+    """Tests for _dequant_fused_tensor with 3-D fused expert tensors."""
+
+    def _make_fused_gguf(self, tmp_path, shape, ggml_type, data, name="blk.0.ffn_gate_exps.weight"):
+        path = tmp_path / "fused.gguf"
+        _create_gguf_with_metadata(
+            path,
+            {"general.architecture": "test"},
+            [{"name": name, "shape": shape, "ggml_type": ggml_type, "data": data}],
+        )
+        return path
+
+    def test_f32_fused_dequant(self, tmp_path):
+        shape = (4, 8, 2)
+        data = _make_f32_tensor_data(shape, fill_value=1.5)
+        path = self._make_fused_gguf(tmp_path, shape, 0, data)
+        reader = GGUFReader(path)
+        info = reader.tensors[0]
+        t = _dequant_fused_tensor(reader, info, "blk.0.ffn_gate_exps.weight", "cpu")
+        assert t.dtype == torch.bfloat16
+        assert t.shape == torch.Size(shape)
+        assert torch.allclose(t.float(), torch.full(shape, 1.5), atol=0.02)
+        reader.close()
+
+    def test_f16_fused_dequant(self, tmp_path):
+        shape = (4, 8, 3)
+        data = _make_f16_tensor_data(shape, fill_value=2.0)
+        path = self._make_fused_gguf(tmp_path, shape, 1, data)
+        reader = GGUFReader(path)
+        info = reader.tensors[0]
+        t = _dequant_fused_tensor(reader, info, "blk.0.ffn_gate_exps.weight", "cpu")
+        assert t.dtype == torch.bfloat16
+        assert t.shape == torch.Size(shape)
+        reader.close()
+
+    def test_unsupported_type_raises(self, tmp_path):
+        shape = (4, 8, 2)
+        data = b"\x00" * (4 * 8 * 2 * 4)
+        path = self._make_fused_gguf(tmp_path, shape, 12, data)
+        reader = GGUFReader(path)
+        info = reader.tensors[0]
+        with pytest.raises(ValueError, match="Unsupported GGML type"):
+            _dequant_fused_tensor(reader, info, "blk.0.ffn_gate_exps.weight", "cpu")
+        reader.close()
+
+
+class TestBuildExpertStoreFromFusedReader:
+    """Tests for _build_expert_store_from_fused_reader."""
+
+    def _create_fused_single_gguf(
+        self, path, n_layers=2, n_experts=4, ffn_size=8, hidden=16, ggml_type=0
+    ):
+        """Create a single GGUF with F32 fused expert tensors.
+
+        Shapes follow Qwen convention: [out_dim, in_dim, n_experts].
+        gate/up: out_dim=ffn_size (intermediate), in_dim=hidden.
+        down:    out_dim=hidden,                  in_dim=ffn_size.
+        """
+        tensors = []
+        for layer in range(n_layers):
+            for proj, shape in [
+                ("gate", (ffn_size, hidden, n_experts)),
+                ("up", (ffn_size, hidden, n_experts)),
+                ("down", (hidden, ffn_size, n_experts)),
+            ]:
+                name = f"blk.{layer}.ffn_{proj}_exps.weight"
+                data = _make_f32_tensor_data(shape, fill_value=float(layer + 1))
+                tensors.append({"name": name, "shape": shape, "ggml_type": ggml_type, "data": data})
+        _create_gguf_with_metadata(path, {"general.architecture": "test"}, tensors)
+
+    def test_returns_none_when_no_fused_tensors(self, tmp_path):
+        path = tmp_path / "no_fused.gguf"
+        data = _make_f32_tensor_data((4, 4))
+        _create_gguf_with_metadata(
+            path,
+            {"general.architecture": "test"},
+            [{"name": "blk.0.attn_q.weight", "shape": (4, 4), "ggml_type": 0, "data": data}],
+        )
+        reader = GGUFReader(path)
+        result = _build_expert_store_from_fused_reader(reader, num_layers=1, num_experts=4, device="cpu")
+        assert result is None
+        reader.close()
+
+    def test_store_shape_correct(self, tmp_path):
+        n_layers, n_experts, ffn_size, hidden = 2, 4, 8, 16
+        path = tmp_path / "fused.gguf"
+        self._create_fused_single_gguf(path, n_layers, n_experts, ffn_size, hidden)
+        reader = GGUFReader(path)
+        store = _build_expert_store_from_fused_reader(reader, num_layers=n_layers, num_experts=n_experts, device="cpu")
+        assert store is not None
+        assert store.num_layers == n_layers
+        assert store.num_experts == n_experts
+        reader.close()
+
+    def test_gate_up_proj_shape(self, tmp_path):
+        n_layers, n_experts, ffn_size, hidden = 1, 4, 8, 16
+        path = tmp_path / "fused.gguf"
+        self._create_fused_single_gguf(path, n_layers, n_experts, ffn_size, hidden)
+        reader = GGUFReader(path)
+        store = _build_expert_store_from_fused_reader(reader, num_layers=n_layers, num_experts=n_experts, device="cpu")
+        assert store is not None
+        # gate_up_proj should be [2*ffn_size, hidden] per expert
+        gu_shape, _ = store.layout.specs["gate_up_proj"]
+        assert gu_shape == (2 * ffn_size, hidden)
+        dn_shape, _ = store.layout.specs["down_proj"]
+        assert dn_shape == (hidden, ffn_size)
+        reader.close()
+
+    def test_expert_values_correct(self, tmp_path):
+        """Verify that sliced expert weights match the expected per-expert slice."""
+        n_layers, n_experts, ffn_size, hidden = 1, 3, 4, 8
+        path = tmp_path / "fused.gguf"
+
+        # Build fused tensors with expert-specific fill values for easy verification
+        # Shapes: gate/up = [ffn_size, hidden, n_experts], down = [hidden, ffn_size, n_experts]
+        tensors = []
+        for proj, shape in [
+            ("gate", (ffn_size, hidden, n_experts)),
+            ("up", (ffn_size, hidden, n_experts)),
+            ("down", (hidden, ffn_size, n_experts)),
+        ]:
+            arr = np.zeros(shape, dtype=np.float32)
+            for e in range(n_experts):
+                arr[:, :, e] = float(e + 1)
+            tensors.append({
+                "name": f"blk.0.ffn_{proj}_exps.weight",
+                "shape": shape,
+                "ggml_type": 0,
+                "data": arr.tobytes(),
+            })
+        _create_gguf_with_metadata(path, {"general.architecture": "test"}, tensors)
+
+        reader = GGUFReader(path)
+        store = _build_expert_store_from_fused_reader(reader, num_layers=n_layers, num_experts=n_experts, device="cpu")
+        assert store is not None
+
+        layout = store.layout
+        for e in range(n_experts):
+            raw = store._data[0, e]
+            gu_offset = layout.offsets["gate_up_proj"]
+            gu_nbytes = layout.sizes["gate_up_proj"]
+            gu_shape, gu_dtype = layout.specs["gate_up_proj"]
+            gu = raw[gu_offset:gu_offset + gu_nbytes].view(gu_dtype).reshape(gu_shape).float()
+
+            dn_offset = layout.offsets["down_proj"]
+            dn_nbytes = layout.sizes["down_proj"]
+            dn_shape, dn_dtype = layout.specs["down_proj"]
+            dn = raw[dn_offset:dn_offset + dn_nbytes].view(dn_dtype).reshape(dn_shape).float()
+
+            expected_val = float(e + 1)
+            assert torch.allclose(gu, torch.full_like(gu, expected_val), atol=0.02), \
+                f"Expert {e} gate_up_proj mismatch"
+            assert torch.allclose(dn, torch.full_like(dn, expected_val), atol=0.02), \
+                f"Expert {e} down_proj mismatch"
+        reader.close()
+
+    def test_fused_expert_excluded_from_non_expert_loading(self, tmp_path):
+        """3-D fused expert tensors must not appear in non_expert_names during load."""
+        n_layers, n_experts, ffn_size, hidden = 1, 2, 4, 8
+        path = tmp_path / "fused_classify.gguf"
+        self._create_fused_single_gguf(path, n_layers, n_experts, ffn_size, hidden)
+
+        reader = GGUFReader(path)
+        import re as _re
+        _fused_re = _re.compile(r"^blk\.\d+\.ffn_(gate|up|down)_exps\.weight$")
+        for t in reader.tensors:
+            if _fused_re.match(t.name):
+                assert len(t.shape) == 3, f"Fused tensor {t.name} should be 3-D"
         reader.close()
 
 
