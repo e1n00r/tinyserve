@@ -18,6 +18,16 @@ try:
 except Exception:
     _get_expert_loop = lambda: None  # noqa: E731
 
+try:
+    from tinyserve._fast_cache import classify_hits_misses as _cy_classify
+except ImportError:
+    _cy_classify = None
+
+try:
+    from tinyserve._fast_cache import group_tokens_by_expert as _cy_group
+except ImportError:
+    _cy_group = None
+
 
 _TEMPLATE_STORAGE: dict[int, dict[str, torch.Tensor]] = {}
 
@@ -399,14 +409,17 @@ class GenericExpertPipeline:
         output = torch.zeros_like(hidden_states)
         top_k = expert_indices.shape[1]
 
-        expert_groups: dict[int, list[tuple[int, int]]] = {}
         eid_list = expert_indices.tolist()
-        for tok in range(seq_len):
-            for k in range(top_k):
-                eid = eid_list[tok][k]
-                if eid not in expert_groups:
-                    expert_groups[eid] = []
-                expert_groups[eid].append((tok, k))
+        if _cy_group is not None:
+            expert_groups = _cy_group(eid_list, seq_len, top_k)
+        else:
+            expert_groups: dict[int, list[tuple[int, int]]] = {}
+            for tok in range(seq_len):
+                for k in range(top_k):
+                    eid = eid_list[tok][k]
+                    if eid not in expert_groups:
+                        expert_groups[eid] = []
+                    expert_groups[eid].append((tok, k))
 
         cache = self.cache
 
@@ -479,15 +492,27 @@ class GenericExpertPipeline:
             hits = []
             misses = []
             expert_ids_list = expert_ids.tolist()  # piggybacks on same sync
-            for i, (eid, slot) in enumerate(zip(expert_ids_list, slots_list)):
-                if slot >= 0:
-                    hits.append((i, slot))
-                    # Update policy recency (Python-only, no GPU sync).
-                    cache._policy.lookup((layer_idx, eid))
+            if _cy_classify is not None:
+                hits, misses = _cy_classify(expert_ids_list, slots_list)
+                for i, slot in hits:
+                    cache._policy.lookup((layer_idx, expert_ids_list[i]))
                     cache.hits += 1
-                else:
-                    misses.append(i)
+                    cache._layer_hits[layer_idx] = cache._layer_hits.get(layer_idx, 0) + 1
+                    cache._expert_access_count[(layer_idx, expert_ids_list[i])] = cache._expert_access_count.get((layer_idx, expert_ids_list[i]), 0) + 1
+                for i in misses:
                     cache.misses += 1
+                    cache._layer_misses[layer_idx] = cache._layer_misses.get(layer_idx, 0) + 1
+                    cache._expert_access_count[(layer_idx, expert_ids_list[i])] = cache._expert_access_count.get((layer_idx, expert_ids_list[i]), 0) + 1
+            else:
+                for i, (eid, slot) in enumerate(zip(expert_ids_list, slots_list)):
+                    if slot >= 0:
+                        hits.append((i, slot))
+                        # Update policy recency (Python-only, no GPU sync).
+                        cache._policy.lookup((layer_idx, eid))
+                        cache.hits += 1
+                    else:
+                        misses.append(i)
+                        cache.misses += 1
         else:
             # Fallback: original Python path for list inputs or old-style cache.
             if isinstance(expert_ids, torch.Tensor):

@@ -218,6 +218,11 @@ class LFRUPolicy(CachePolicy):
         self._data[key] = [slot, 1, self._clock]
 
     def select_evict(self) -> tuple[tuple, int]:
+        try:
+            from tinyserve._fast_cache import lfru_select_evict
+            return lfru_select_evict(self._data, self._clock)
+        except ImportError:
+            pass
         # Lowest score = freq / (clock - last_access + 1)
         # Evict entry where score is minimised.
         best_key = None
