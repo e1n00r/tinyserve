@@ -772,7 +772,7 @@ def _set_param(model: torch.nn.Module, hf_name: str, tensor: torch.Tensor):
     if hasattr(obj, final):
         attr = getattr(obj, final)
         if isinstance(attr, torch.nn.Parameter):
-            attr.data = tensor
+            attr.data = tensor.to(dtype=attr.data.dtype, device=attr.data.device)
         else:
             setattr(obj, final, torch.nn.Parameter(tensor, requires_grad=False))
     else:
