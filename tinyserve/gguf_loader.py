@@ -460,8 +460,21 @@ def load_from_gguf(
             "implemented — the HF config is needed to create the model skeleton."
         )
 
+    # Handle multimodal wrappers (e.g., Qwen 3.5 MoE)
+    # Extract text_config if present — the text model is what we offload
+    effective_config = getattr(hf_config, "text_config", hf_config)
+    if effective_config is not hf_config:
+        logger.info("Multimodal model detected, using text_config for model creation")
+        hf_config = effective_config
+
+    # Try specific model class for known multimodal architectures
+    model_type = getattr(hf_config, "model_type", "")
     with init_empty_weights():
-        model = AutoModelForCausalLM.from_config(hf_config, torch_dtype=torch.bfloat16)
+        if "qwen3_5_moe" in model_type:
+            from transformers import Qwen3_5MoeForCausalLM
+            model = Qwen3_5MoeForCausalLM(hf_config).to(dtype=torch.bfloat16)
+        else:
+            model = AutoModelForCausalLM.from_config(hf_config, torch_dtype=torch.bfloat16)
 
     # Step 3: Classify tensors into expert vs non-expert
     if is_multi:
