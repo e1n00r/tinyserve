@@ -70,7 +70,7 @@ _SCALAR_READERS: dict[int, tuple[str, int]] = {
 
 
 class GGUFReader:
-    MAGIC = 0x46475547  # "GGUF" little-endian
+    MAGIC = 0x46554747  # b"GGUF" as little-endian uint32
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
