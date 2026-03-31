@@ -1,0 +1,31 @@
+=== Dynamic VRAM Rebalancing E2E Test ===
+
+Initial: 237 expert slots, 64 KV tokens
+Tokens per expert slot: 269
+Budget: min_expert=4, max_expert=237
+
+--- Phase 1: Short prompt (fits in KV) ---
+  KV: 11/64, Experts: 237, Rebalances: 0
+
+--- Phase 2: Medium prompt (overflow → rebalance) ---
+  Prompt tokens: 18, KV max: 64
+  KV: 37/64, Experts: 237, Rebalances: 0
+
+--- Phase 3: Long prompt (more rebalancing) ---
+  Prompt tokens: 200, KV max: 64
+  ERROR: CUDA out of memory. Tried to allocate 2.91 GiB. GPU 0 has a total capacity of 7.54 GiB of which 904.
+
+--- Phase 4: Release KV, restore experts ---
+  Experts: 237 (was 237)
+
+--- Phase 5: Fresh request with restored cache ---
+  10 tokens, 10.4 tok/s, HR=94.4%
+
+=======================================================
+SUMMARY
+  Initial:       237 experts, 64 KV
+  After growth:  237 experts, 64 KV
+  After release: 237 experts
+  Total rebalances: 0
+  FAIL: No rebalancing triggered
+Done.
