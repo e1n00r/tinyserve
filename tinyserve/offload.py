@@ -368,6 +368,17 @@ def offload_model(
         p.cache = cache
         p.cache_bias = cache_bias
 
+    from .vram_budget import VRAMBudget
+    if cache is not None and kv_cache is not None:
+        kv_bpt = kv_cache.vram_bytes // max(1, kv_cache.max_seq_len)
+        model._vram_budget = VRAMBudget(
+            expert_cache=cache, kv_cache=kv_cache,
+            expert_bytes=buf_bytes, kv_bytes_per_token=kv_bpt,
+            max_expert_capacity=cache_capacity,
+        )
+    else:
+        model._vram_budget = None
+
     # Load buddy tables for miss substitution
     if buddy_table_path is not None:
         import json
