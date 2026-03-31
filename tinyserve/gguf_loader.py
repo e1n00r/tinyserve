@@ -399,9 +399,32 @@ def _dequant_tensor(
         t = torch.from_numpy(values.reshape(info.shape))
         return t.to(torch.bfloat16).to(device)
 
+    if ggml_type == 14:  # Q6_K — 210 bytes per 256 elements
+        n_elements = 1
+        for d in info.shape:
+            n_elements *= d
+        n_blocks = n_elements // 256
+        values = np.empty(n_elements, dtype=np.float32)
+        for b in range(n_blocks):
+            block = raw[b * 210:(b + 1) * 210]
+            # Q6_K layout: ql[128] + qh[64] + scales[16] + d(float16)
+            ql = np.frombuffer(block[:128], dtype=np.uint8)
+            qh = np.frombuffer(block[128:192], dtype=np.uint8)
+            scales = np.frombuffer(block[192:208], dtype=np.int8).astype(np.float32)
+            d = np.frombuffer(block[208:210], dtype=np.float16).astype(np.float32)[0]
+            # Decode 6-bit values: lower 4 bits from ql, upper 2 bits from qh
+            for j in range(256):
+                q_lo = int(ql[j // 2] >> (4 * (j % 2))) & 0xF
+                q_hi = int(qh[j // 4] >> (2 * (j % 4))) & 0x3
+                q = q_lo | (q_hi << 4)
+                sc_idx = j // 16
+                values[b * 256 + j] = d * scales[sc_idx] * (q - 32)
+        t = torch.from_numpy(values.reshape(info.shape))
+        return t.to(torch.bfloat16).to(device)
+
     raise ValueError(
         f"Unsupported GGML type {ggml_type} ({GGML_TYPES.get(ggml_type, ('UNKNOWN',))[0]}) "
-        f"for non-expert tensor '{name}'. Only F32, F16, Q4_K, Q8_0 are supported."
+        f"for non-expert tensor '{name}'. Only F32, F16, Q4_K, Q6_K, Q8_0 are supported."
     )
 
 
