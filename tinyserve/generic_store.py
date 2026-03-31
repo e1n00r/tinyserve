@@ -567,6 +567,14 @@ class GenericLRUCache:
         self._free_slots = list(range(capacity - 1, -1, -1))
         self.hits = 0
         self.misses = 0
+        # Per-layer statistics
+        self._layer_hits: dict[int, int] = {}
+        self._layer_misses: dict[int, int] = {}
+        self._layer_miss_latencies: dict[int, list[float]] = {}
+        self._expert_access_count: dict[tuple[int, int], int] = {}
+        # Per-step tracking
+        self._step_experts: set[tuple[int, int]] | None = None
+        self._step_lookups: int = 0
         # GPU-resident slot map: [num_layers, num_experts] → cache slot index.
         # -1 = not cached. Updated on allocate/evict (miss path only).
         # Queried via tensor indexing — no CUDA sync needed.
@@ -578,10 +586,17 @@ class GenericLRUCache:
 
     def lookup(self, layer_idx: int, expert_idx: int) -> int | None:
         slot = self._policy.lookup((layer_idx, expert_idx))
+        key = (layer_idx, expert_idx)
+        self._expert_access_count[key] = self._expert_access_count.get(key, 0) + 1
+        if self._step_experts is not None:
+            self._step_experts.add(key)
+            self._step_lookups += 1
         if slot is not None:
             self.hits += 1
+            self._layer_hits[layer_idx] = self._layer_hits.get(layer_idx, 0) + 1
         else:
             self.misses += 1
+            self._layer_misses[layer_idx] = self._layer_misses.get(layer_idx, 0) + 1
         return slot
 
     def contains(self, layer_idx: int, expert_idx: int) -> bool:
@@ -662,9 +677,49 @@ class GenericLRUCache:
         total = self.hits + self.misses
         return self.hits / total if total > 0 else 0.0
 
+    def record_miss_latency(self, layer_idx: int, latency_ms: float):
+        if layer_idx not in self._layer_miss_latencies:
+            self._layer_miss_latencies[layer_idx] = []
+        self._layer_miss_latencies[layer_idx].append(latency_ms)
+
+    def get_layer_stats(self) -> dict[int, dict]:
+        layers = set(self._layer_hits.keys()) | set(self._layer_misses.keys())
+        layers |= set(range(self._slot_map_dims[0]))
+        result = {}
+        for li in sorted(layers):
+            h = self._layer_hits.get(li, 0)
+            m = self._layer_misses.get(li, 0)
+            result[li] = {
+                "hits": h,
+                "misses": m,
+                "hit_rate": h / (h + m) if (h + m) > 0 else 0.0,
+                "miss_latency_ms": self._layer_miss_latencies.get(li, []),
+            }
+        return result
+
+    def get_expert_frequencies(self) -> dict[tuple[int, int], int]:
+        return dict(self._expert_access_count)
+
+    def begin_step(self):
+        self._step_experts = set()
+        self._step_lookups = 0
+
+    def end_step(self) -> dict:
+        result = {
+            "unique_experts_accessed": len(self._step_experts) if self._step_experts else 0,
+            "total_lookups": self._step_lookups,
+        }
+        self._step_experts = None
+        self._step_lookups = 0
+        return result
+
     def reset_stats(self):
         self.hits = 0
         self.misses = 0
+        self._layer_hits.clear()
+        self._layer_misses.clear()
+        self._layer_miss_latencies.clear()
+        self._expert_access_count.clear()
 
     @staticmethod
     def estimate_capacity(available_bytes: int, expert_bytes: int) -> int:
