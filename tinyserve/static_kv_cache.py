@@ -12,6 +12,17 @@ Usage:
 import torch
 
 
+class KVCacheOverflow(RuntimeError):
+    """Raised when KV cache update exceeds max_seq_len.
+
+    Carries `tokens_needed` — how many additional tokens are required.
+    VRAMBudget catches this and frees expert slots to extend the KV cache.
+    """
+    def __init__(self, tokens_needed: int):
+        self.tokens_needed = tokens_needed
+        super().__init__(f"KV cache overflow: need {tokens_needed} more tokens")
+
+
 class StaticKVCache:
     """Pre-allocated KV cache — zero allocation during decode.
 
@@ -64,6 +75,7 @@ class StaticKVCache:
             self._v = self._v.pin_memory()
         self._seq_lens = [0] * num_layers
         self.is_sliding = [False] * num_layers
+        self._vram_budget = None  # Set by offload.py when VRAMBudget is created
 
     @classmethod
     def from_model_config(cls, config, max_seq_len=4096, device="cuda", dtype=torch.bfloat16, storage_device=None):
@@ -116,9 +128,11 @@ class StaticKVCache:
         start = self._seq_lens[layer_idx]
         end = start + new_tokens
         if end > self.max_seq_len:
-            raise RuntimeError(
-                f"KV cache overflow: {end} > {self.max_seq_len}. Increase max_seq_len or reduce context."
-            )
+            if self._vram_budget is not None:
+                if self._vram_budget.handle_overflow(end - self.max_seq_len):
+                    # KV extended — retry the write (now fits)
+                    return self.update(key_states, value_states, layer_idx, cache_kwargs)
+            raise KVCacheOverflow(end - self.max_seq_len)
         store_val_k = key_states
         store_val_v = value_states
         if self._dtype != self._compute_dtype:
