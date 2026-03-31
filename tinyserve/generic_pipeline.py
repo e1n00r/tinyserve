@@ -567,6 +567,28 @@ class GenericExpertPipeline:
         if self.cpu_on_miss and self.cpu_expert is not None and h.shape[0] == 1:
             for i in misses:
                 eid = expert_ids_list[i]
+
+                # BuddyMoE: try cached substitute first (zero stall).
+                if self.buddy_table is not None and cache is not None:
+                    if cache._slot_map is not None and layer_idx < cache._slot_map.shape[0]:
+                        cached_mask = cache._slot_map[layer_idx] >= 0
+                        cached_experts = set(torch.where(cached_mask)[0].tolist())
+                    else:
+                        cached_experts = set()
+                    buddy_eid = self.buddy_table.find_cached_buddy(eid, cached_experts)
+                    if buddy_eid is not None:
+                        buddy_slot = cache.lookup(layer_idx, buddy_eid)
+                        if buddy_slot is not None:
+                            packed = cache.get_packed(buddy_slot)
+                            out = None
+                            if _inline is not None:
+                                out = _inline(packed, h)
+                            if out is None:
+                                out = forward_from_packed(self.template, packed, self._param_refs, h)
+                            output[tok_idx] += weights[i] * out.squeeze(0)
+                            continue
+
+                # No buddy available — fall back to CPU compute.
                 expert_packed = self.store.get_expert_data(layer_idx, eid)
                 with _prof.phase("cpu_compute") if _prof else nullcontext():
                     out = self.cpu_expert.forward(h, expert_packed)
