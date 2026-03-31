@@ -331,6 +331,8 @@ class GenericExpertPipeline:
         self.cache = cache
         self.ram_cache = ram_cache
         self.cpu_expert = cpu_expert
+        self.cpu_on_miss: bool = False
+        self.buddy_table = None  # Set externally after profiling
         self.cache_bias: float = 0.0  # logit bias magnitude for cache-aware routing (I4)
         self.profiler: OffloadProfiler | None = None
         # Precomputed param refs for zero-copy forward from cache slots.
@@ -557,6 +559,21 @@ class GenericExpertPipeline:
                 output[tok_idx] += weights[i] * out.squeeze(0)
 
         if not misses:
+            return
+
+        # Fiddler (arxiv 2402.07033): at batch=1, route ALL misses through CPU compute.
+        # Sending activations (~KB) to CPU is faster than H2D weight transfer (~MB).
+        # cpu_on_miss=True enables this path; False preserves original GPU pipeline.
+        if self.cpu_on_miss and self.cpu_expert is not None and h.shape[0] == 1:
+            for i in misses:
+                eid = expert_ids_list[i]
+                expert_packed = self.store.get_expert_data(layer_idx, eid)
+                with _prof.phase("cpu_compute") if _prof else nullcontext():
+                    out = self.cpu_expert.forward(h, expert_packed)
+                output[tok_idx] += weights[i] * out.squeeze(0)
+                if cache is not None:
+                    gpu_slot = cache.allocate(layer_idx, eid)
+                    cache.get_packed(gpu_slot).copy_(expert_packed[:cache.expert_bytes], non_blocking=True)
             return
 
         # Split misses: RAM-cached experts go to GPU pipeline (fast H2D from pinned),

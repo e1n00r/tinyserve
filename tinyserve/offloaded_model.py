@@ -241,6 +241,8 @@ class OffloadedModel(nn.Module):
             )
             pipeline._prefetch_fp8_stage = shared_prefetch_fp8_stage
             pipeline.profiler = profiler
+            if cpu_expert is not None:
+                pipeline.cpu_on_miss = True
             pipelines.append(pipeline)
             moe_blocks.append(moe_block)
             routes.append(_extract_routing_fn(moe_block, router_attr, top_k, softmax_order))

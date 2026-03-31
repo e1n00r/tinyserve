@@ -512,6 +512,10 @@ class GenericExpertStore:
         fp8_layout = self.layout if self._fp8 else None
         return GenericExpertBuffer(self._bf16_layout, device, fp8_layout=fp8_layout)
 
+    def get_expert_data(self, layer_idx: int, expert_idx: int) -> torch.Tensor:
+        """Return raw packed expert data from CPU store (pinned memory)."""
+        return self._data[layer_idx, expert_idx]
+
     def copy_to_buffer(
         self,
         buf: "GenericExpertBuffer",
