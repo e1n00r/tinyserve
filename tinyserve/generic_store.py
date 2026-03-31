@@ -579,15 +579,16 @@ class GenericLRUCache:
         # Per-step tracking
         self._step_experts: set[tuple[int, int]] | None = None
         self._step_lookups: int = 0
-        # GPU-resident slot map: [num_layers, num_experts] → cache slot index.
-        # -1 = not cached. Updated on allocate/evict (miss path only).
-        # Queried via tensor indexing — no CUDA sync needed.
-        # Lazily sized on first allocate if num_layers/num_experts are defaults.
+        # Slot map: CPU array is primary (written per-allocate, no CUDA kernel),
+        # GPU tensor is synced lazily before lookup_slots reads it.
+        import numpy as np
         self._slot_map: torch.Tensor | None = None
+        self._slot_map_cpu: np.ndarray | None = None
+        self._slot_map_dirty: bool = False
         self._slot_map_dims = (num_layers, num_experts)
         if num_layers > 1 or num_experts > 1:
-            self._slot_map = torch.full((num_layers, num_experts), -1, dtype=torch.int32, device=device)
-        self._pending_slot_writes: dict[tuple[int, int], int] = {}  # (layer, expert) -> slot or -1
+            self._slot_map_cpu = np.full((num_layers, num_experts), -1, dtype=np.int32)
+            self._slot_map = torch.from_numpy(self._slot_map_cpu).to(dtype=torch.int32, device=device)
 
     def lookup(self, layer_idx: int, expert_idx: int) -> int | None:
         slot = self._policy.lookup((layer_idx, expert_idx))
@@ -620,16 +621,21 @@ class GenericLRUCache:
 
     def _ensure_slot_map(self, layer_idx: int, expert_idx: int):
         """Lazily create or grow the slot map to fit (layer_idx, expert_idx)."""
+        import numpy as np
         nl = max(self._slot_map_dims[0], layer_idx + 1)
         ne = max(self._slot_map_dims[1], expert_idx + 1)
-        if self._slot_map is None:
-            self._slot_map = torch.full((nl, ne), -1, dtype=torch.int32, device=self.device)
+        if self._slot_map_cpu is None:
+            self._slot_map_cpu = np.full((nl, ne), -1, dtype=np.int32)
+            self._slot_map = torch.from_numpy(self._slot_map_cpu).to(dtype=torch.int32, device=self.device)
             self._slot_map_dims = (nl, ne)
-        elif nl > self._slot_map.shape[0] or ne > self._slot_map.shape[1]:
-            new_map = torch.full((nl, ne), -1, dtype=torch.int32, device=self.device)
-            new_map[: self._slot_map.shape[0], : self._slot_map.shape[1]] = self._slot_map
-            self._slot_map = new_map
+        elif nl > self._slot_map_cpu.shape[0] or ne > self._slot_map_cpu.shape[1]:
+            new_cpu = np.full((nl, ne), -1, dtype=np.int32)
+            old = self._slot_map_cpu
+            new_cpu[:old.shape[0], :old.shape[1]] = old
+            self._slot_map_cpu = new_cpu
+            self._slot_map = torch.from_numpy(new_cpu).to(dtype=torch.int32, device=self.device)
             self._slot_map_dims = (nl, ne)
+            self._slot_map_dirty = False
 
     def allocate(self, layer_idx: int, expert_idx: int) -> int:
         key = (layer_idx, expert_idx)
@@ -638,29 +644,24 @@ class GenericLRUCache:
         else:
             evict_key, slot = self._policy.select_evict()
             self._policy.remove(evict_key)
-            self._pending_slot_writes[evict_key] = -1
+            if self._slot_map is not None:
+                self._slot_map_cpu[evict_key[0], evict_key[1]] = -1
+                self._slot_map_dirty = True
         self._policy.insert(key, slot)
         self._ensure_slot_map(layer_idx, expert_idx)
-        self._pending_slot_writes[key] = slot
+        self._slot_map_cpu[layer_idx, expert_idx] = slot
+        self._slot_map_dirty = True
         return slot
 
     def flush_slot_updates(self):
-        """Batch-apply deferred slot_map writes. Call once per decode step."""
-        if not self._pending_slot_writes:
+        """Sync CPU slot_map to GPU. Called automatically by lookup_slots."""
+        if not self._slot_map_dirty or self._slot_map_cpu is None:
             return
-        if self._slot_map is None:
-            self._pending_slot_writes.clear()
-            return
-
-        items = list(self._pending_slot_writes.items())
-        layers = torch.tensor([k[0] for k, _ in items], dtype=torch.long, device=self.device)
-        experts = torch.tensor([k[1] for k, _ in items], dtype=torch.long, device=self.device)
-        slots = torch.tensor([v for _, v in items], dtype=torch.int32, device=self.device)
-        self._slot_map.index_put_((layers, experts), slots)
-        self._pending_slot_writes.clear()
+        self._slot_map.copy_(torch.from_numpy(self._slot_map_cpu))
+        self._slot_map_dirty = False
 
     def lookup_slots(self, layer_idx: int, expert_ids: torch.Tensor) -> torch.Tensor:
-        """GPU tensor cache lookup — no CUDA sync.
+        """GPU tensor cache lookup — syncs from CPU if dirty.
 
         Args:
             layer_idx: which MoE layer
@@ -670,6 +671,8 @@ class GenericLRUCache:
             [top_k] int32 tensor on GPU. Values >= 0 are cache slot indices,
             -1 means cache miss.
         """
+        if self._slot_map_dirty:
+            self.flush_slot_updates()
         if self._slot_map is None:
             return torch.full_like(expert_ids, -1, dtype=torch.int32)
         if layer_idx >= self._slot_map.shape[0]:
