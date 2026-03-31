@@ -1,0 +1,33 @@
+=== Comprehensive MoE Benchmark === 2026-03-31 11:31
+
+PART 1: Policy Comparison (10 diverse prompts, 25 gen tokens each)
+Policy      HR%   tok/s  Deep(18-23)      Worst
+--------------------------------------------------
+  Running lru...
+lru      87.8%   10.7         8%  L23=3%
+  Running lfru...
+lfru     89.7%    9.4        52%  L11=38%
+  Running slru...
+slru     89.4%    8.9        55%  L3=33%
+  Running lfu...
+lfu      76.4%    5.5        80%  L0=26%
+  Running fifo...
+fifo     87.8%    8.3        14%  L22=9%
+  Running ls...
+ls       88.9%    8.4        24%  L23=18%
+  Running dali...
+dali     87.7%    8.6         8%  L23=3%
+
+PART 2: FATE Prediction Accuracy (diverse prompts)
+  Running temporal+FATE...
+  temporal+FATE: FAILED — no stats
+  Running FATE_only...
+  FATE_only: FAILED — no stats
+
+PART 3: Qwen 3.5-122B GGUF Q4_K Parse Test
+  FAILED: Traceback (most recent call last):
+  File "<string>", line 11, in <module>
+ImportError: cannot import name 'open_gguf' from 'tinyserve.gguf_reader' (/home/elnur/gpt-oss-offload/tinyserve/gguf_reader.p
+
+Results saved to benchmarks/comprehensive_20260326.json
+Done: 11:43:48
