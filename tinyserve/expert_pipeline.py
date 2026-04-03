@@ -19,17 +19,17 @@ except Exception:
     _get_expert_loop = lambda: None  # noqa: E731
 
 try:
-    from tinyserve._fast_cache import classify_hits_misses as _cy_classify
+    from tinyserve._fast_cache import classify_hits_misses as _cython_classify_hits
 except ImportError:
-    _cy_classify = None
+    _cython_classify_hits = None
 
 try:
-    from tinyserve._fast_cache import group_tokens_by_expert as _cy_group
+    from tinyserve._fast_cache import group_tokens_by_expert as _cython_group_by_expert
 except ImportError:
-    _cy_group = None
+    _cython_group_by_expert = None
 
 
-_TEMPLATE_STORAGE: dict[int, dict[str, torch.Tensor]] = {}
+_template_weight_storage: dict[int, dict[str, torch.Tensor]] = {}
 
 
 def _get_template_storage(template: nn.Module, layout) -> dict[str, torch.Tensor]:
@@ -39,7 +39,7 @@ def _get_template_storage(template: nn.Module, layout) -> dict[str, torch.Tensor
     never into cache slot views left behind by forward_from_packed.
     """
     tid = id(template)
-    if tid not in _TEMPLATE_STORAGE:
+    if tid not in _template_weight_storage:
         storage = {}
         for name, (shape, dtype) in layout.specs.items():
             parts = name.split(".")
@@ -48,8 +48,8 @@ def _get_template_storage(template: nn.Module, layout) -> dict[str, torch.Tensor
                 mod = getattr(mod, part)
             param = getattr(mod, parts[-1])
             storage[name] = torch.empty(shape, dtype=dtype, device=param.device)
-        _TEMPLATE_STORAGE[tid] = storage
-    return _TEMPLATE_STORAGE[tid]
+        _template_weight_storage[tid] = storage
+    return _template_weight_storage[tid]
 
 
 def swap_weights_and_forward(
@@ -438,8 +438,8 @@ class ExpertPipeline:
         top_k = expert_indices.shape[1]
 
         eid_list = expert_indices.tolist()
-        if _cy_group is not None:
-            expert_groups = _cy_group(eid_list, seq_len, top_k)
+        if _cython_group_by_expert is not None:
+            expert_groups = _cython_group_by_expert(eid_list, seq_len, top_k)
         else:
             expert_groups: dict[int, list[tuple[int, int]]] = {}
             for tok in range(seq_len):
@@ -522,8 +522,8 @@ class ExpertPipeline:
             hits = []
             misses = []
             expert_ids_list = expert_ids.tolist()  # piggybacks on same sync
-            if _cy_classify is not None:
-                hits, misses = _cy_classify(expert_ids_list, slots_list)
+            if _cython_classify_hits is not None:
+                hits, misses = _cython_classify_hits(expert_ids_list, slots_list)
                 for i, slot in hits:
                     cache._policy.lookup((layer_idx, expert_ids_list[i]))
                     cache.hits += 1
