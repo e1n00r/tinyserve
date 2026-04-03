@@ -234,7 +234,10 @@ class ExpertCache:
         self._free_slots = self._free_slots[n_slots:]
 
         new_capacity = self.capacity - n_slots
-        self._packed = self._packed[:new_capacity].clone()
+        # Narrow without clone — avoids OOM from temporary double allocation.
+        # The view keeps the original tensor alive, but we only access
+        # [:new_capacity] positions going forward.
+        self._packed = self._packed.narrow(0, 0, new_capacity)
         self.capacity = new_capacity
 
         if self._slot_map_dirty:
