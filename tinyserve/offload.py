@@ -10,12 +10,21 @@ Usage:
 """
 
 import logging
+from enum import Enum
 from typing import NamedTuple
 
 import torch
 
 from .model_registry import profile_from_config
 from ._model_hooks import OffloadedModel
+
+
+class AttentionBackend(str, Enum):
+    EAGER = "eager"
+    SDPA = "sdpa"
+    FLEX = "flex"
+    FLASHINFER = "flashinfer"
+    FLASH_ATTENTION_2 = "flash_attention_2"
 
 
 class RoutingSpec(NamedTuple):
@@ -124,9 +133,9 @@ def _register_flex_attention() -> str:
         gpt_oss_mod = getattr(transformers.models, "gpt_oss", None)
         if gpt_oss_mod:
             gpt_oss_mod.modeling_gpt_oss.GptOssPreTrainedModel._supports_flex = True
-        return "flex"
+        return AttentionBackend.FLEX
     except Exception:
-        return "eager"
+        return AttentionBackend.EAGER
 
 
 def _register_sdpa_attention() -> str:
@@ -165,9 +174,9 @@ def _register_sdpa_attention() -> str:
         gpt_oss_mod = getattr(transformers.models, "gpt_oss", None)
         if gpt_oss_mod:
             gpt_oss_mod.modeling_gpt_oss.GptOssPreTrainedModel._supports_sdpa = True
-        return "sdpa"
+        return AttentionBackend.SDPA
     except Exception:
-        return "eager"
+        return AttentionBackend.EAGER
 
 
 def _register_flashinfer_attention() -> str:
@@ -220,9 +229,9 @@ def _register_flashinfer_attention() -> str:
         gpt_oss_mod = getattr(transformers.models, "gpt_oss", None)
         if gpt_oss_mod:
             gpt_oss_mod.modeling_gpt_oss.GptOssPreTrainedModel._supports_flashinfer = True
-        return "flashinfer"
+        return AttentionBackend.FLASHINFER
     except Exception:
-        return "eager"
+        return AttentionBackend.EAGER
 
 
 _ROUTING_MAP: dict[str, RoutingSpec] = {
@@ -253,7 +262,7 @@ def offload_model(
     max_seq_len: int = 0,
     kv_dtype: torch.dtype = torch.bfloat16,
     gpu_memory_utilization: float = 0.90,
-    attn_implementation: str | None = None,
+    attn_implementation: str | AttentionBackend | None = None,
     disk_offload: bool = False,
     ram_cache_gb: float = 0,
     kv_offload: bool = False,
@@ -341,7 +350,7 @@ def offload_model(
 
     kv_cache = None
     kv_vram = 0
-    use_flex = attn_implementation == "flex"
+    use_flex = attn_implementation == AttentionBackend.FLEX
     if max_seq_len > 0:
         storage_device = "cpu" if kv_offload else None
         kv_cache = StaticKVCache.from_model_config(config, max_seq_len=max_seq_len, device=device, dtype=kv_dtype, storage_device=storage_device)
@@ -448,7 +457,7 @@ def load_and_offload(
     torch_dtype=torch.bfloat16,
     fp8: bool = True,
     adaptive_fate: bool = True,
-    attn_implementation: str | None = None,
+    attn_implementation: str | AttentionBackend | None = None,
     max_seq_len: int = 0,
     kv_dtype: torch.dtype = torch.bfloat16,
     gpu_memory_utilization: float = 0.90,
@@ -475,19 +484,19 @@ def load_and_offload(
 
     if attn_implementation is not None:
         attn_impl = attn_implementation
-        if attn_impl == "flex":
+        if attn_impl == AttentionBackend.FLEX:
             _register_flex_attention()
-        elif attn_impl == "sdpa":
+        elif attn_impl == AttentionBackend.SDPA:
             _register_sdpa_attention()
-        elif attn_impl == "flashinfer":
+        elif attn_impl == AttentionBackend.FLASHINFER:
             attn_impl = _register_flashinfer_attention()
     else:
-        attn_impl = "eager"
+        attn_impl = AttentionBackend.EAGER
         if flash_attention:
             try:
                 import flash_attn  # noqa: F401
 
-                attn_impl = "flash_attention_2"
+                attn_impl = AttentionBackend.FLASH_ATTENTION_2
             except ImportError:
                 # SDPA: fused kernel with O(n) memory, no torch.compile overhead.
                 attn_impl = _register_sdpa_attention()

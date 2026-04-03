@@ -13,6 +13,7 @@ __version__ = "0.1.0"
 from .chunked import chunked_prefill as chunked_prefill
 from .chunked import generate_chunked as generate_chunked
 from .gguf_loader import load_from_gguf as load_from_gguf
+from .offload import AttentionBackend as AttentionBackend
 from .offload import load_and_offload as load_and_offload
 from .offload import offload_model as offload_model
 from .paged_kv_cache import PagedKVPool as PagedKVPool
