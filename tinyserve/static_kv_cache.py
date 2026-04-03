@@ -302,3 +302,71 @@ class StaticKVCache:
                 self._v_scales[layer_idx, :, :, window_start:seq_len].clone()
 
         self._seq_lens[layer_idx] = max_kept
+
+    def enable_h2o(self, budget: int = 1024, sink_size: int = 4) -> None:
+        """Enable H2O (Heavy Hitter Oracle) KV eviction.
+
+        Keeps the ``sink_size`` initial tokens + the ``budget - sink_size``
+        tokens with highest cumulative attention scores. Evicts the rest.
+        Unlike StreamingLLM (which keeps only recent tokens), H2O preserves
+        tokens that are consistently important across all decode steps.
+
+        Based on H2O (NeurIPS 2023, arxiv 2306.14048).
+
+        Must call ``update_h2o_scores(attn_weights, layer_idx)`` after each
+        attention step to accumulate scores.
+        """
+        self._h2o = True
+        self._h2o_budget = budget
+        self._h2o_sink = sink_size
+        # Cumulative attention scores per position per layer
+        self._h2o_scores = torch.zeros(
+            self.num_layers, self.max_seq_len,
+            dtype=torch.float32, device=self._storage_device,
+        )
+
+    def update_h2o_scores(self, attn_weights: torch.Tensor, layer_idx: int) -> None:
+        """Accumulate attention scores for H2O eviction.
+
+        Args:
+            attn_weights: [batch, heads, q_len, kv_len] attention weights
+            layer_idx: which layer
+        """
+        if not getattr(self, '_h2o', False):
+            return
+        # Sum across batch, heads, and query positions
+        scores = attn_weights.sum(dim=(0, 1, 2))  # [kv_len]
+        seq_len = self._seq_lens[layer_idx]
+        kv_len = min(scores.shape[0], seq_len)
+        self._h2o_scores[layer_idx, :kv_len] += scores[:kv_len].to(
+            device=self._storage_device, dtype=torch.float32
+        )
+
+    def _evict_h2o(self, layer_idx: int) -> None:
+        """Evict low-scoring KV entries based on H2O scores."""
+        if not getattr(self, '_h2o', False):
+            return
+        seq_len = self._seq_lens[layer_idx]
+        if seq_len <= self._h2o_budget:
+            return
+
+        scores = self._h2o_scores[layer_idx, :seq_len].clone()
+        # Protect sink tokens (infinite score)
+        scores[:self._h2o_sink] = float('inf')
+
+        # Select top-budget positions by score
+        _, keep_indices = scores.topk(self._h2o_budget)
+        keep_indices = keep_indices.sort().values  # maintain temporal order
+
+        # Compact KV to keep only selected positions
+        self._k[layer_idx, :, :, :self._h2o_budget] = \
+            self._k[layer_idx, :, :, keep_indices].clone()
+        self._v[layer_idx, :, :, :self._h2o_budget] = \
+            self._v[layer_idx, :, :, keep_indices].clone()
+
+        # Compact scores
+        self._h2o_scores[layer_idx, :self._h2o_budget] = \
+            self._h2o_scores[layer_idx, keep_indices].clone()
+        self._h2o_scores[layer_idx, self._h2o_budget:] = 0
+
+        self._seq_lens[layer_idx] = self._h2o_budget
