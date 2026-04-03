@@ -129,12 +129,13 @@ def _register_flex_attention() -> str:
         try:
             transformers.AttentionMaskInterface.register("flex", transformers.masking_utils.eager_mask)
         except Exception:
-            pass
+            logger.warning("FlexAttention mask interface registration failed", exc_info=True)
         gpt_oss_mod = getattr(transformers.models, "gpt_oss", None)
         if gpt_oss_mod:
             gpt_oss_mod.modeling_gpt_oss.GptOssPreTrainedModel._supports_flex = True
         return AttentionBackend.FLEX
     except Exception:
+        logger.warning("FlexAttention registration failed, falling back to eager", exc_info=True)
         return AttentionBackend.EAGER
 
 
@@ -170,12 +171,13 @@ def _register_sdpa_attention() -> str:
         try:
             transformers.AttentionMaskInterface.register("sdpa", transformers.masking_utils.eager_mask)
         except Exception:
-            pass
+            logger.warning("SDPA mask interface registration failed", exc_info=True)
         gpt_oss_mod = getattr(transformers.models, "gpt_oss", None)
         if gpt_oss_mod:
             gpt_oss_mod.modeling_gpt_oss.GptOssPreTrainedModel._supports_sdpa = True
         return AttentionBackend.SDPA
     except Exception:
+        logger.warning("SDPA registration failed, falling back to eager", exc_info=True)
         return AttentionBackend.EAGER
 
 
@@ -225,12 +227,13 @@ def _register_flashinfer_attention() -> str:
         try:
             transformers.AttentionMaskInterface.register("flashinfer", transformers.masking_utils.eager_mask)
         except Exception:
-            pass
+            logger.warning("FlashInfer mask interface registration failed", exc_info=True)
         gpt_oss_mod = getattr(transformers.models, "gpt_oss", None)
         if gpt_oss_mod:
             gpt_oss_mod.modeling_gpt_oss.GptOssPreTrainedModel._supports_flashinfer = True
         return AttentionBackend.FLASHINFER
     except Exception:
+        logger.warning("FlashInfer registration failed, falling back to eager", exc_info=True)
         return AttentionBackend.EAGER
 
 
@@ -307,7 +310,14 @@ def offload_model(
     profile = profile_from_config(effective_config)
     model_type = effective_config.model_type
 
-    spec = _ROUTING_MAP.get(model_type, RoutingSpec("softmax_then_topk", True, "gate"))
+    _default_spec = RoutingSpec("softmax_then_topk", True, "gate")
+    spec = _ROUTING_MAP.get(model_type, _default_spec)
+    if spec is _default_spec:
+        logger.warning(
+            "Unknown model type %r — using default routing spec %s. "
+            "Add it to _ROUTING_MAP for optimal performance.",
+            model_type, _default_spec,
+        )
     softmax_order, returns_logits, router_attr = spec
 
     inner_model = model.model if hasattr(model, "model") else model
@@ -366,6 +376,13 @@ def offload_model(
             cache_capacity = max_capacity
         else:
             cache_capacity = min(cache_capacity, max_capacity)
+        if cache_capacity == 0:
+            logger.warning(
+                "Expert cache auto-sized to 0 slots — insufficient free VRAM "
+                "(free=%.2f GB, reserved=%.2f GB, expert=%.2f MB). "
+                "All expert loads will be cache misses.",
+                free_vram / 1e9, reserved / 1e9, buf_bytes / 1e6,
+            )
 
     cache = (
         ExpertCache(

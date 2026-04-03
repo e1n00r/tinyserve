@@ -4,6 +4,7 @@ Works with any nn.Module expert: swaps weights from the buffer into a
 template module, calls forward(), accumulates weighted outputs.
 """
 
+import logging
 from contextlib import nullcontext
 
 import torch
@@ -13,19 +14,24 @@ from .expert_store import ExpertBuffer, ExpertStore, ExpertCache
 from .profiler import OffloadProfiler
 from .ram_cache import madvise_willneed
 
+logger = logging.getLogger(__name__)
+
 try:
     from .csrc import get_expert_loop as _get_expert_loop
 except Exception:
+    logger.warning("C++ expert loop extension not available, using Python fallback")
     _get_expert_loop = lambda: None  # noqa: E731
 
 try:
     from tinyserve._fast_cache import classify_hits_misses as _cython_classify_hits
 except ImportError:
+    logger.debug("Cython classify_hits_misses not available, using Python fallback")
     _cython_classify_hits = None
 
 try:
     from tinyserve._fast_cache import group_tokens_by_expert as _cython_group_by_expert
 except ImportError:
+    logger.debug("Cython group_tokens_by_expert not available, using Python fallback")
     _cython_group_by_expert = None
 
 

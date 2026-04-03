@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ctypes
 import gc
+import logging
 import os
 import tempfile
 from typing import TYPE_CHECKING
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
     from .ram_cache import RAMCache
 
 from .cache_policy import make_policy
+
+logger = logging.getLogger(__name__)
 
 
 def _is_qtensor(param) -> bool:
@@ -266,7 +269,7 @@ class ExpertStore:
         try:
             os.unlink(tmp_name)
         except OSError:
-            pass
+            logger.warning("Failed to delete temp file %s", tmp_name, exc_info=True)
 
         store = cls(pinned, store_layout, num_layers, num_experts, bf16_layout=bf16_layout if fp8 else None)
         return store, num_experts
@@ -404,7 +407,7 @@ class ExpertStore:
                 num_moe_layers, num_experts, model_hash_val,
             )
         except Exception:
-            pass  # Cache save is best-effort; don't block loading.
+            logger.warning("Expert cache save failed (non-fatal)", exc_info=True)
 
         if disk_offload:
             # Phase 2: Auto-detect whether experts fit in available RAM.
@@ -427,7 +430,7 @@ class ExpertStore:
                 try:
                     os.unlink(tmp_name)
                 except OSError:
-                    pass
+                    logger.warning("Failed to delete temp file %s", tmp_name, exc_info=True)
                 # Bypass __init__'s is_pinned() check (no CUDA in test envs).
                 store = cls.__new__(cls)
                 store._data = pinned
@@ -498,7 +501,7 @@ class ExpertStore:
         try:
             os.unlink(tmp_name)
         except OSError:
-            pass
+            logger.warning("Failed to delete temp file %s", tmp_name, exc_info=True)
 
         store = cls(pinned, layout, num_moe_layers, num_experts)
         store._disk_offload = False

@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 
 import torch
+
+logger = logging.getLogger(__name__)
 from safetensors.torch import load_file, save_file
 
 
@@ -125,6 +128,7 @@ def load_int4_cache(
             "model_hash": metadata["model_hash"],
         }
     except Exception:
+        logger.warning("Failed to load expert cache from disk, will rebuild", exc_info=True)
         return None
 
 

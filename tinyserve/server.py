@@ -219,7 +219,7 @@ def _make_chat_prompt(messages: list[dict], tokenizer=None) -> str:
                 messages, tokenize=False, add_generation_prompt=True,
             )
         except Exception:
-            pass
+            logger.warning("chat template application failed, falling back to manual format", exc_info=True)
     parts = []
     for m in messages:
         role = m.get("role", "user")
@@ -375,6 +375,7 @@ def create_app(
         try:
             data = await http_req.json()
         except Exception:
+            logger.warning("Failed to parse JSON request body", exc_info=True)
             return web.json_response(_error_json(400, "invalid JSON body"), status=400)
 
         messages = data.get("messages")
@@ -402,6 +403,7 @@ def create_app(
         try:
             data = await http_req.json()
         except Exception:
+            logger.warning("Failed to parse JSON request body", exc_info=True)
             return web.json_response(_error_json(400, "invalid JSON body"), status=400)
 
         prompt = data.get("prompt", "")

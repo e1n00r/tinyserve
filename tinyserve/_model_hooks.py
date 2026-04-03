@@ -5,6 +5,7 @@ installs offloaded dispatch hooks, moves non-expert weights to GPU.
 """
 
 import copy
+import logging
 
 import torch
 import torch.nn as nn
@@ -15,18 +16,21 @@ from .expert_store import ExpertStore, _is_qtensor
 from .mxfp4 import dequant_mxfp4_no_transpose
 from .profiler import OffloadProfiler
 
+logger = logging.getLogger(__name__)
+
 _MXFP4_BACKEND = "pytorch"
 try:
     from .triton_dot_scaled import dot_scaled_vecmat as _dot_scaled_vecmat
 
     _MXFP4_BACKEND = "dot_scaled"
 except Exception:
+    logger.debug("triton dot_scaled not available")
     try:
         from .triton_dequant import fused_dequant_vecmat as _fused_dequant_vecmat
 
         _MXFP4_BACKEND = "triton_sw"
     except Exception:
-        pass
+        logger.debug("triton fused_dequant not available, using pytorch backend")
 
 
 # Per-layer FATE accuracy tracking.

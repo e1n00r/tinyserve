@@ -12,8 +12,11 @@ Slot allocation (free list) stays in the cache class, not the policy.
 """
 
 import heapq
+import logging
 from abc import ABC, abstractmethod
 from collections import OrderedDict, deque
+
+logger = logging.getLogger(__name__)
 
 
 class CachePolicy(ABC):
@@ -221,7 +224,7 @@ class LFRUPolicy(CachePolicy):
             from tinyserve._fast_cache import lfru_select_evict
             return lfru_select_evict(self._data, self._clock)
         except ImportError:
-            pass
+            logger.debug("Cython lfru_select_evict not available, using Python fallback")
         # Lowest score = freq / (clock - last_access + 1)
         # Evict entry where score is minimised.
         best_key = None
