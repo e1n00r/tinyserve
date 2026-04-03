@@ -10,6 +10,7 @@ Usage:
 """
 
 import logging
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import NamedTuple
 
@@ -33,6 +34,29 @@ class RoutingSpec(NamedTuple):
     router_attr: str     # attribute name on MoE block ("gate" | "router")
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TinyserveConfig:
+    """Configuration for expert offloading.
+
+    Pass to load_and_offload or offload_model instead of individual kwargs.
+    All fields have sensible defaults — only override what you need.
+    """
+    cache_capacity: int = 0
+    cache_policy: str = "lfru"
+    cache_bias: float = 0.0
+    adaptive_fate: bool = True
+    max_seq_len: int = 0
+    kv_dtype: torch.dtype = field(default_factory=lambda: torch.bfloat16)
+    gpu_memory_utilization: float = 0.90
+    fp8: bool = True
+    disk_offload: bool = False
+    ram_cache_gb: float = 0
+    kv_offload: bool = False
+    buddy_table_path: str | None = None
+    imatrix_path: str | None = None
+    attn_implementation: str | AttentionBackend | None = None
 
 
 def _register_flex_attention() -> str:
@@ -256,8 +280,9 @@ _ROUTING_MAP: dict[str, RoutingSpec] = {
 def offload_model(
     model: torch.nn.Module,
     device: str | torch.device = "cuda",
-    cache_capacity: int = 0,
+    offload_config: TinyserveConfig | None = None,
     model_id: str | None = None,
+    cache_capacity: int = 0,
     cache_policy: str = "lfru",
     fp8: bool = True,
     cache_bias: float = 0.0,
@@ -280,6 +305,9 @@ def offload_model(
     Args:
         model: HuggingFace CausalLM model (e.g., MixtralForCausalLM)
         device: GPU device for non-expert weights and cache
+        offload_config: TinyserveConfig object. When provided, its fields override
+            the individual kwargs. Lets callers pass a single config object instead
+            of 15 keyword arguments.
         cache_capacity: number of experts to cache in VRAM (0 = no cache)
         model_id: HuggingFace repo id or local path. When provided for models
             with native quantized expert weights (e.g. MXFP4), expert tensors
@@ -297,6 +325,22 @@ def offload_model(
         The same model object with experts offloaded. Call model(input_ids)
         as normal — expert loading is handled transparently.
     """
+    if offload_config is not None:
+        cache_capacity = offload_config.cache_capacity
+        cache_policy = offload_config.cache_policy
+        cache_bias = offload_config.cache_bias
+        adaptive_fate = offload_config.adaptive_fate
+        max_seq_len = offload_config.max_seq_len
+        kv_dtype = offload_config.kv_dtype
+        gpu_memory_utilization = offload_config.gpu_memory_utilization
+        fp8 = offload_config.fp8
+        disk_offload = offload_config.disk_offload
+        ram_cache_gb = offload_config.ram_cache_gb
+        kv_offload = offload_config.kv_offload
+        buddy_table_path = offload_config.buddy_table_path
+        imatrix_path = offload_config.imatrix_path
+        attn_implementation = offload_config.attn_implementation
+
     if cache_capacity < 0:
         raise ValueError("cache_capacity must be >= 0")
     device = torch.device(device)
@@ -467,6 +511,7 @@ def offload_model(
 def load_and_offload(
     model_id: str,
     device: str | torch.device = "cuda",
+    offload_config: TinyserveConfig | None = None,
     cache_capacity: int = 0,
     cache_policy: str = "lfru",
     cache_bias: float = 0.0,
@@ -490,11 +535,30 @@ def load_and_offload(
     Args:
         model_id: HuggingFace repo id or local path
         device: GPU device
+        offload_config: TinyserveConfig object. When provided, its fields override
+            the individual kwargs.
         cache_capacity: expert slots in VRAM (0 = auto)
         cache_policy: 'lru', 'slru', 'lfu', 'lfru', 'fifo', or 'ls'
         buddy_table_path: path to JSON buddy table for miss substitution
         **hf_kwargs: passed through to AutoModelForCausalLM.from_pretrained
     """
+    if offload_config is not None:
+        cache_capacity = offload_config.cache_capacity
+        cache_policy = offload_config.cache_policy
+        cache_bias = offload_config.cache_bias
+        adaptive_fate = offload_config.adaptive_fate
+        max_seq_len = offload_config.max_seq_len
+        kv_dtype = offload_config.kv_dtype
+        gpu_memory_utilization = offload_config.gpu_memory_utilization
+        fp8 = offload_config.fp8
+        disk_offload = offload_config.disk_offload
+        ram_cache_gb = offload_config.ram_cache_gb
+        kv_offload = offload_config.kv_offload
+        buddy_table_path = offload_config.buddy_table_path
+        imatrix_path = offload_config.imatrix_path
+        if offload_config.attn_implementation is not None:
+            attn_implementation = offload_config.attn_implementation
+
     if cache_capacity < 0:
         raise ValueError("cache_capacity must be >= 0")
     from transformers import AutoModelForCausalLM
