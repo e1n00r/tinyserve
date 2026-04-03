@@ -268,10 +268,10 @@ def run_context_scaling(
 def _swap_cache_policy(model, policy: str, device: str | torch.device = "cuda"):
     """Replace the cache policy on all pipelines without reloading the model.
 
-    Reinitialises GenericLRUCache with the same capacity but a new policy,
+    Reinitialises ExpertCache with the same capacity but a new policy,
     preserving all non-expert GPU state. Expert weights on CPU are unaffected.
     """
-    from tinyserve.generic_store import GenericLRUCache
+    from tinyserve.expert_store import ExpertCache
 
     pipelines = getattr(model, "_offload_pipelines", [])
     if not pipelines or pipelines[0].cache is None:
@@ -286,7 +286,7 @@ def _swap_cache_policy(model, policy: str, device: str | torch.device = "cuda"):
         p.cache = None
     del old_cache
     torch.cuda.empty_cache()
-    new_cache = GenericLRUCache(capacity, expert_bytes, cache_device, policy=policy)
+    new_cache = ExpertCache(capacity, expert_bytes, cache_device, policy=policy)
     for p in pipelines:
         p.cache = new_cache
 

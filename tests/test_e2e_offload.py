@@ -87,8 +87,8 @@ def _extract_expert_weights(model, num_layers, num_experts):
 @requires_cuda
 def test_offloaded_model_matches_reference():
     """Full MoE model with offloaded experts produces identical logits."""
-    from tinyserve.generic_pipeline import GenericExpertPipeline
-    from tinyserve.generic_store import GenericExpertStore
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertStore
 
     torch.manual_seed(42)
     hidden, intermediate = 64, 128
@@ -106,19 +106,19 @@ def test_offloaded_model_matches_reference():
         ref_logits = model(input_ids)
 
     expert_weights = _extract_expert_weights(model, num_layers, num_experts)
-    store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts)
-    from tinyserve.generic_store import GenericLRUCache
+    store = ExpertStore.from_dict(expert_weights, num_layers, num_experts)
+    from tinyserve.expert_store import ExpertCache
 
     shared_buf_a = store.allocate_buffer(device)
     shared_buf_b = store.allocate_buffer(device)
     transfer_stream = torch.cuda.Stream(device)
     compute_stream = torch.cuda.Stream(device)
-    shared_cache = GenericLRUCache(16, store.expert_bytes, device)
+    shared_cache = ExpertCache(16, store.expert_bytes, device)
     template = SwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
 
     for li in range(num_layers):
         moe = model.layers[li].mlp
-        pipeline = GenericExpertPipeline(
+        pipeline = ExpertPipeline(
             store,
             template,
             device,
@@ -154,8 +154,8 @@ def test_offloaded_model_matches_reference():
 @requires_cuda
 def test_offloaded_autoregressive_matches():
     """Multi-step autoregressive generation produces identical tokens."""
-    from tinyserve.generic_pipeline import GenericExpertPipeline
-    from tinyserve.generic_store import GenericExpertStore
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertStore
 
     torch.manual_seed(123)
     hidden, intermediate = 64, 128
@@ -179,19 +179,19 @@ def test_offloaded_autoregressive_matches():
             ids = torch.cat([ids, next_tok], dim=1)
 
     expert_weights = _extract_expert_weights(model, num_layers, num_experts)
-    store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts)
-    from tinyserve.generic_store import GenericLRUCache
+    store = ExpertStore.from_dict(expert_weights, num_layers, num_experts)
+    from tinyserve.expert_store import ExpertCache
 
     shared_buf_a = store.allocate_buffer(device)
     shared_buf_b = store.allocate_buffer(device)
     transfer_stream = torch.cuda.Stream(device)
     compute_stream = torch.cuda.Stream(device)
-    shared_cache = GenericLRUCache(16, store.expert_bytes, device)
+    shared_cache = ExpertCache(16, store.expert_bytes, device)
     template = SwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
 
     for li in range(num_layers):
         moe = model.layers[li].mlp
-        pipeline = GenericExpertPipeline(
+        pipeline = ExpertPipeline(
             store,
             template,
             device,

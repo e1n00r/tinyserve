@@ -24,8 +24,8 @@ class TinyFusedExpert(nn.Module):
 
 
 def _make_pipeline(num_experts=4, hidden=16, intermediate=32, device="cuda"):
-    from tinyserve.generic_store import GenericExpertStore, GenericLRUCache
-    from tinyserve.generic_pipeline import GenericExpertPipeline
+    from tinyserve.expert_store import ExpertStore, ExpertCache
+    from tinyserve.expert_pipeline import ExpertPipeline
 
     weights = {}
     for li in range(1):
@@ -34,15 +34,15 @@ def _make_pipeline(num_experts=4, hidden=16, intermediate=32, device="cuda"):
                 "gate_up_proj": torch.randn(2 * intermediate, hidden, dtype=torch.bfloat16),
                 "down_proj": torch.randn(hidden, intermediate, dtype=torch.bfloat16),
             }
-    store = GenericExpertStore.from_dict(weights, 1, num_experts)
+    store = ExpertStore.from_dict(weights, 1, num_experts)
     template = TinyFusedExpert(hidden, intermediate).to(device).to(torch.bfloat16)
     buf_a = store.allocate_buffer(torch.device(device))
     buf_b = store.allocate_buffer(torch.device(device))
     ts = torch.cuda.Stream(torch.device(device))
     cs = torch.cuda.Stream(torch.device(device))
-    cache = GenericLRUCache(num_experts, store.buffer_expert_bytes, torch.device(device),
+    cache = ExpertCache(num_experts, store.buffer_expert_bytes, torch.device(device),
                            num_layers=1, num_experts=num_experts)
-    pipeline = GenericExpertPipeline(store, template, torch.device(device),
+    pipeline = ExpertPipeline(store, template, torch.device(device),
                                      buf_a, buf_b, ts, cs, cache=cache)
     return pipeline
 

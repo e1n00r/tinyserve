@@ -31,7 +31,7 @@ class QTensor:
 
 def test_expand_param_qtensor():
     """QTensor params are expanded to blocks+scales with correct naming."""
-    from tinyserve.generic_store import _expand_param, _is_qtensor
+    from tinyserve.expert_store import _expand_param, _is_qtensor
 
     int_data = torch.randint(0, 255, (4, 8, 16), dtype=torch.uint8)
     scale = torch.randint(0, 255, (4, 8), dtype=torch.uint8)
@@ -47,7 +47,7 @@ def test_expand_param_qtensor():
 
 def test_expand_param_qtensor_sliced():
     """Expert-index slicing on QTensor expansion picks the right expert row."""
-    from tinyserve.generic_store import _expand_param
+    from tinyserve.expert_store import _expand_param
 
     int_data = torch.randint(0, 255, (8, 16, 4), dtype=torch.uint8)
     scale = torch.randint(0, 255, (8, 16), dtype=torch.uint8)
@@ -61,7 +61,7 @@ def test_expand_param_qtensor_sliced():
 @requires_cuda
 def test_store_and_retrieve_expert_weights():
     """Store BF16 expert weights on CPU, retrieve to GPU, values match."""
-    from tinyserve.generic_store import GenericExpertStore
+    from tinyserve.expert_store import ExpertStore
 
     num_layers, num_experts, hidden = 2, 4, 64
     intermediate = 128
@@ -75,7 +75,7 @@ def test_store_and_retrieve_expert_weights():
                 "down_proj.weight": torch.randn(hidden, intermediate, dtype=torch.bfloat16),
             }
 
-    store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts)
+    store = ExpertStore.from_dict(expert_weights, num_layers, num_experts)
 
     device = torch.device("cuda")
     buf = store.allocate_buffer(device)
@@ -91,7 +91,7 @@ def test_store_and_retrieve_expert_weights():
 @requires_cuda
 def test_buffer_reuse_across_experts():
     """Same buffer can be reused for different experts without corruption."""
-    from tinyserve.generic_store import GenericExpertStore
+    from tinyserve.expert_store import ExpertStore
 
     expert_weights = {}
     for ei in range(3):
@@ -99,7 +99,7 @@ def test_buffer_reuse_across_experts():
             "w.weight": torch.full((8, 8), float(ei), dtype=torch.bfloat16),
         }
 
-    store = GenericExpertStore.from_dict(expert_weights, 1, 3)
+    store = ExpertStore.from_dict(expert_weights, 1, 3)
     buf = store.allocate_buffer(torch.device("cuda"))
 
     for ei in range(3):
@@ -112,7 +112,7 @@ def test_buffer_reuse_across_experts():
 @requires_cuda
 def test_expert_bytes_computed_from_weights():
     """Expert byte size is derived from actual weight shapes, not hardcoded."""
-    from tinyserve.generic_store import GenericExpertStore
+    from tinyserve.expert_store import ExpertStore
 
     expert_weights = {
         (0, 0): {
@@ -124,7 +124,7 @@ def test_expert_bytes_computed_from_weights():
             "b.weight": torch.randn(16, 32, dtype=torch.bfloat16),
         },
     }
-    store = GenericExpertStore.from_dict(expert_weights, 1, 2)
+    store = ExpertStore.from_dict(expert_weights, 1, 2)
 
     expected_bytes = (32 * 16 + 16 * 32) * 2
     assert store.expert_bytes == expected_bytes
@@ -133,7 +133,7 @@ def test_expert_bytes_computed_from_weights():
 @requires_cuda
 def test_lru_cache_with_generic_store():
     """LRU cache works with generic store's buffer format."""
-    from tinyserve.generic_store import GenericExpertStore, GenericLRUCache
+    from tinyserve.expert_store import ExpertStore, ExpertCache
 
     expert_weights = {}
     for ei in range(4):
@@ -141,9 +141,9 @@ def test_lru_cache_with_generic_store():
             "w.weight": torch.full((8, 8), float(ei), dtype=torch.bfloat16),
         }
 
-    store = GenericExpertStore.from_dict(expert_weights, 1, 4)
+    store = ExpertStore.from_dict(expert_weights, 1, 4)
     device = torch.device("cuda")
-    cache = GenericLRUCache(capacity=2, expert_bytes=store.expert_bytes, device=device)
+    cache = ExpertCache(capacity=2, expert_bytes=store.expert_bytes, device=device)
     buf = store.allocate_buffer(device)
 
     store.copy_to_buffer(buf, 0, 1, non_blocking=False)
@@ -161,12 +161,12 @@ def test_lru_cache_with_generic_store():
 @requires_cuda
 def test_async_copy_with_stream():
     """Non-blocking copy on a CUDA stream produces correct results."""
-    from tinyserve.generic_store import GenericExpertStore
+    from tinyserve.expert_store import ExpertStore
 
     expert_weights = {
         (0, 0): {"w.weight": torch.randn(64, 64, dtype=torch.bfloat16)},
     }
-    store = GenericExpertStore.from_dict(expert_weights, 1, 1)
+    store = ExpertStore.from_dict(expert_weights, 1, 1)
     device = torch.device("cuda")
     buf = store.allocate_buffer(device)
 
@@ -186,7 +186,7 @@ def test_async_copy_with_stream():
 @requires_cuda
 def test_fp8_double_buffer_no_race():
     """FP8 copy_to_buffer uses per-buffer staging — no race between buf_a and buf_b."""
-    from tinyserve.generic_store import GenericExpertStore
+    from tinyserve.expert_store import ExpertStore
 
     num_layers, num_experts = 1, 4
     expert_weights = {}
@@ -195,7 +195,7 @@ def test_fp8_double_buffer_no_race():
             "w.weight": torch.full((32, 32), float(ei + 1), dtype=torch.bfloat16),
         }
 
-    store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts, fp8=True)
+    store = ExpertStore.from_dict(expert_weights, num_layers, num_experts, fp8=True)
     device = torch.device("cuda")
     buf_a = store.allocate_buffer(device)
     buf_b = store.allocate_buffer(device)
@@ -218,7 +218,7 @@ def test_fp8_double_buffer_no_race():
 @requires_cuda
 def test_fp8_roundtrip_accuracy():
     """FP8 compression→decompression preserves values within FP8 quantization error."""
-    from tinyserve.generic_store import GenericExpertStore
+    from tinyserve.expert_store import ExpertStore
 
     expert_weights = {
         (0, 0): {
@@ -227,7 +227,7 @@ def test_fp8_roundtrip_accuracy():
         },
     }
 
-    store = GenericExpertStore.from_dict(expert_weights, 1, 1, fp8=True)
+    store = ExpertStore.from_dict(expert_weights, 1, 1, fp8=True)
     device = torch.device("cuda")
     buf = store.allocate_buffer(device)
 

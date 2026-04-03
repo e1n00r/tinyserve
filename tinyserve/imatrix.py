@@ -70,8 +70,8 @@ def seed_cache_from_ranking(
     """Pre-load top experts into GPU cache based on imatrix ranking.
 
     Args:
-        cache: GenericLRUCache
-        store: GenericExpertStore
+        cache: ExpertCache
+        store: ExpertStore
         ranking: {layer_idx: [expert_ids sorted by importance descending]}
         slots_per_layer: max experts to seed per layer (None = fill cache evenly)
 

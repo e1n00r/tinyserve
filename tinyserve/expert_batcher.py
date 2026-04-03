@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import torch
 
-from .generic_pipeline import GenericExpertPipeline, forward_from_packed, swap_weights_and_forward
+from .expert_pipeline import ExpertPipeline, forward_from_packed, swap_weights_and_forward
 
 
 @dataclass
@@ -25,7 +25,7 @@ class BatchItem:
 class ExpertBatcher:
     """Batches expert forwards across multiple concurrent requests."""
 
-    def __init__(self, pipeline: GenericExpertPipeline):
+    def __init__(self, pipeline: ExpertPipeline):
         self._pipeline = pipeline
 
     def batch_execute(self, items: list[BatchItem], layer_idx: int) -> list[torch.Tensor]:

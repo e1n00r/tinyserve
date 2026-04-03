@@ -28,8 +28,8 @@ class TinyFusedExpert(nn.Module):
 def _build_store_and_pipeline(
     num_layers=1, num_experts=4, hidden=16, intermediate=32, device="cpu"
 ):
-    """Build a GenericExpertStore + GenericExpertPipeline on CPU for testing."""
-    from tinyserve.generic_store import GenericExpertStore, TensorLayout
+    """Build a ExpertStore + ExpertPipeline on CPU for testing."""
+    from tinyserve.expert_store import ExpertStore, TensorLayout
 
     expert_weights = {}
     for li in range(num_layers):
@@ -39,7 +39,7 @@ def _build_store_and_pipeline(
                 "down_proj": torch.randn(hidden, intermediate, dtype=torch.bfloat16),
             }
 
-    store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts)
+    store = ExpertStore.from_dict(expert_weights, num_layers, num_experts)
     return store, expert_weights
 
 
@@ -62,8 +62,8 @@ def _ref_expert_output(expert_weights, layer_idx, expert_ids, routing_weights, h
 def test_single_request_matches_unbatched():
     """Single request through ExpertBatcher matches pipeline.execute_layer_experts."""
     from tinyserve.expert_batcher import BatchItem, ExpertBatcher
-    from tinyserve.generic_pipeline import GenericExpertPipeline
-    from tinyserve.generic_store import GenericExpertStore, GenericLRUCache
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertStore, ExpertCache
 
     hidden, intermediate = 16, 32
     num_experts = 4
@@ -76,9 +76,9 @@ def test_single_request_matches_unbatched():
     buf_b = store.allocate_buffer(device)
     ts = torch.cuda.Stream(device)
     cs = torch.cuda.Stream(device)
-    cache = GenericLRUCache(num_experts, store.buffer_expert_bytes, device, num_layers=1, num_experts=num_experts)
+    cache = ExpertCache(num_experts, store.buffer_expert_bytes, device, num_layers=1, num_experts=num_experts)
 
-    pipeline = GenericExpertPipeline(store, template, device, buf_a, buf_b, ts, cs, cache=cache)
+    pipeline = ExpertPipeline(store, template, device, buf_a, buf_b, ts, cs, cache=cache)
 
     h = torch.randn(1, hidden, device=device, dtype=torch.bfloat16)
     expert_ids = torch.tensor([1, 3], device=device)
@@ -108,8 +108,8 @@ def test_single_request_matches_unbatched():
 def test_two_requests_same_expert_batched():
     """Two requests needing the same expert: expert loaded once, both get correct output."""
     from tinyserve.expert_batcher import BatchItem, ExpertBatcher
-    from tinyserve.generic_pipeline import GenericExpertPipeline
-    from tinyserve.generic_store import GenericLRUCache
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertCache
 
     hidden, intermediate = 16, 32
     num_experts = 4
@@ -122,9 +122,9 @@ def test_two_requests_same_expert_batched():
     buf_b = store.allocate_buffer(device)
     ts = torch.cuda.Stream(device)
     cs = torch.cuda.Stream(device)
-    cache = GenericLRUCache(num_experts, store.buffer_expert_bytes, device, num_layers=1, num_experts=num_experts)
+    cache = ExpertCache(num_experts, store.buffer_expert_bytes, device, num_layers=1, num_experts=num_experts)
 
-    pipeline = GenericExpertPipeline(store, template, device, buf_a, buf_b, ts, cs, cache=cache)
+    pipeline = ExpertPipeline(store, template, device, buf_a, buf_b, ts, cs, cache=cache)
 
     h1 = torch.randn(1, hidden, device=device, dtype=torch.bfloat16)
     h2 = torch.randn(1, hidden, device=device, dtype=torch.bfloat16)
@@ -151,8 +151,8 @@ def test_two_requests_same_expert_batched():
 def test_two_requests_different_experts():
     """Two requests with non-overlapping experts both produce correct output."""
     from tinyserve.expert_batcher import BatchItem, ExpertBatcher
-    from tinyserve.generic_pipeline import GenericExpertPipeline
-    from tinyserve.generic_store import GenericLRUCache
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertCache
 
     hidden, intermediate = 16, 32
     num_experts = 4
@@ -165,9 +165,9 @@ def test_two_requests_different_experts():
     buf_b = store.allocate_buffer(device)
     ts = torch.cuda.Stream(device)
     cs = torch.cuda.Stream(device)
-    cache = GenericLRUCache(num_experts, store.buffer_expert_bytes, device, num_layers=1, num_experts=num_experts)
+    cache = ExpertCache(num_experts, store.buffer_expert_bytes, device, num_layers=1, num_experts=num_experts)
 
-    pipeline = GenericExpertPipeline(store, template, device, buf_a, buf_b, ts, cs, cache=cache)
+    pipeline = ExpertPipeline(store, template, device, buf_a, buf_b, ts, cs, cache=cache)
 
     h1 = torch.randn(1, hidden, device=device, dtype=torch.bfloat16)
     h2 = torch.randn(1, hidden, device=device, dtype=torch.bfloat16)
@@ -194,8 +194,8 @@ def test_two_requests_different_experts():
 def test_scatter_correct_order():
     """With 3 requests and mixed expert assignments, outputs land in correct request slots."""
     from tinyserve.expert_batcher import BatchItem, ExpertBatcher
-    from tinyserve.generic_pipeline import GenericExpertPipeline
-    from tinyserve.generic_store import GenericLRUCache
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertCache
 
     hidden, intermediate = 16, 32
     num_experts = 4
@@ -208,9 +208,9 @@ def test_scatter_correct_order():
     buf_b = store.allocate_buffer(device)
     ts = torch.cuda.Stream(device)
     cs = torch.cuda.Stream(device)
-    cache = GenericLRUCache(num_experts, store.buffer_expert_bytes, device, num_layers=1, num_experts=num_experts)
+    cache = ExpertCache(num_experts, store.buffer_expert_bytes, device, num_layers=1, num_experts=num_experts)
 
-    pipeline = GenericExpertPipeline(store, template, device, buf_a, buf_b, ts, cs, cache=cache)
+    pipeline = ExpertPipeline(store, template, device, buf_a, buf_b, ts, cs, cache=cache)
 
     items = []
     refs = []
@@ -233,8 +233,8 @@ def test_scatter_correct_order():
 def test_cache_hit_batched():
     """Cache hits across requests are served without re-loading experts."""
     from tinyserve.expert_batcher import BatchItem, ExpertBatcher
-    from tinyserve.generic_pipeline import GenericExpertPipeline
-    from tinyserve.generic_store import GenericLRUCache
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertCache
 
     hidden, intermediate = 16, 32
     num_experts = 4
@@ -247,9 +247,9 @@ def test_cache_hit_batched():
     buf_b = store.allocate_buffer(device)
     ts = torch.cuda.Stream(device)
     cs = torch.cuda.Stream(device)
-    cache = GenericLRUCache(num_experts, store.buffer_expert_bytes, device, num_layers=1, num_experts=num_experts)
+    cache = ExpertCache(num_experts, store.buffer_expert_bytes, device, num_layers=1, num_experts=num_experts)
 
-    pipeline = GenericExpertPipeline(store, template, device, buf_a, buf_b, ts, cs, cache=cache)
+    pipeline = ExpertPipeline(store, template, device, buf_a, buf_b, ts, cs, cache=cache)
 
     # Warm the cache by running one pass
     h_warm = torch.randn(1, hidden, device=device, dtype=torch.bfloat16)
@@ -284,8 +284,8 @@ def test_cache_hit_batched():
 def test_empty_requests():
     """Empty request list returns empty output list."""
     from tinyserve.expert_batcher import BatchItem, ExpertBatcher
-    from tinyserve.generic_pipeline import GenericExpertPipeline
-    from tinyserve.generic_store import GenericLRUCache
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertCache
 
     hidden, intermediate = 16, 32
     num_experts = 4
@@ -299,7 +299,7 @@ def test_empty_requests():
     ts = torch.cuda.Stream(device)
     cs = torch.cuda.Stream(device)
 
-    pipeline = GenericExpertPipeline(store, template, device, buf_a, buf_b, ts, cs)
+    pipeline = ExpertPipeline(store, template, device, buf_a, buf_b, ts, cs)
 
     batcher = ExpertBatcher(pipeline)
     outputs = batcher.batch_execute([], layer_idx=0)
@@ -310,8 +310,8 @@ def test_empty_requests():
 def test_batch_size_one_no_regression():
     """Batch of size 1 produces identical output to unbatched path."""
     from tinyserve.expert_batcher import BatchItem, ExpertBatcher
-    from tinyserve.generic_pipeline import GenericExpertPipeline
-    from tinyserve.generic_store import GenericLRUCache
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertCache
 
     hidden, intermediate = 16, 32
     num_experts = 4
@@ -324,9 +324,9 @@ def test_batch_size_one_no_regression():
     buf_b = store.allocate_buffer(device)
     ts = torch.cuda.Stream(device)
     cs = torch.cuda.Stream(device)
-    cache = GenericLRUCache(num_experts, store.buffer_expert_bytes, device, num_layers=1, num_experts=num_experts)
+    cache = ExpertCache(num_experts, store.buffer_expert_bytes, device, num_layers=1, num_experts=num_experts)
 
-    pipeline = GenericExpertPipeline(store, template, device, buf_a, buf_b, ts, cs, cache=cache)
+    pipeline = ExpertPipeline(store, template, device, buf_a, buf_b, ts, cs, cache=cache)
 
     h = torch.randn(1, hidden, device=device, dtype=torch.bfloat16)
     eids = torch.tensor([2, 3], device=device)

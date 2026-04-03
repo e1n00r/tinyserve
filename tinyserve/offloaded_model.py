@@ -10,8 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .generic_pipeline import GenericExpertPipeline
-from .generic_store import GenericExpertStore, _is_qtensor
+from .expert_pipeline import ExpertPipeline
+from .expert_store import ExpertStore, _is_qtensor
 from .mxfp4 import dequant_mxfp4_no_transpose
 from .profiler import OffloadProfiler
 
@@ -109,7 +109,7 @@ class OffloadedModel(nn.Module):
     def __init__(
         self,
         model: nn.Module,
-        pipelines: list[GenericExpertPipeline],
+        pipelines: list[ExpertPipeline],
     ):
         super().__init__()
         self.model = model
@@ -177,7 +177,7 @@ class OffloadedModel(nn.Module):
             gc.collect()
 
             if disk_offload:
-                store, _, ram_cache = GenericExpertStore.from_safetensors(
+                store, _, ram_cache = ExpertStore.from_safetensors(
                     model_id, moe_block_attr, expert_list_attr, layer_indices,
                     disk_offload=True, ram_cache_gb=ram_cache_gb,
                 )
@@ -189,7 +189,7 @@ class OffloadedModel(nn.Module):
                 except ValueError:
                     cpu_expert = None
             else:
-                store, _ = GenericExpertStore.from_safetensors(
+                store, _ = ExpertStore.from_safetensors(
                     model_id, moe_block_attr, expert_list_attr, layer_indices,
                 )
             template = _FusedExpertTemplate.from_layout(store.layout, first_container)
@@ -204,7 +204,7 @@ class OffloadedModel(nn.Module):
         else:
             # Standard path: extract weights from the model's current parameters.
             template = _make_template(first_container, device)
-            store, _ = GenericExpertStore.build(moe_layers, moe_block_attr, expert_list_attr, fp8=fp8)
+            store, _ = ExpertStore.build(moe_layers, moe_block_attr, expert_list_attr, fp8=fp8)
 
         shared_buf_a = store.allocate_buffer(device)  # always BF16 layout
         shared_buf_b = store.allocate_buffer(device)
@@ -226,7 +226,7 @@ class OffloadedModel(nn.Module):
         fate_top_k = top_k + 1
         for store_idx, (li, layer) in enumerate(moe_layers):
             moe_block = getattr(layer, moe_block_attr)
-            pipeline = GenericExpertPipeline(
+            pipeline = ExpertPipeline(
                 store,
                 template,
                 device,
@@ -324,7 +324,7 @@ class _FusedExpertTemplate(nn.Module):
     @classmethod
     def from_layout(cls, layout: "TensorLayout", fused_container: nn.Module) -> "_FusedExpertTemplate":  # noqa: F821
         """Create template from a TensorLayout (used with native safetensors loading)."""
-        from .generic_store import TensorLayout  # noqa: F401
+        from .expert_store import TensorLayout  # noqa: F401
 
         obj = cls.__new__(cls)
         nn.Module.__init__(obj)

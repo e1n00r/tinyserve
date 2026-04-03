@@ -10,7 +10,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from .generic_store import TensorLayout, _pack_tensors
+from .expert_store import TensorLayout, _pack_tensors
 from .gguf_quant import q4k_expert_to_int4pack
 from .gguf_reader import GGUFReader
 

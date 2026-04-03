@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from tests.conftest import requires_cuda
 from tinyserve.cpu_expert import HAS_INT4_CPU, mxfp4_to_int4pack
-from tinyserve.generic_store import TensorLayout, _pack_tensors
+from tinyserve.expert_store import TensorLayout, _pack_tensors
 from tinyserve.mxfp4 import dequant_mxfp4_no_transpose
 
 HAS_INT4_GPU = (
@@ -280,23 +280,23 @@ class TestGPUINT4Availability:
 class TestGPUINT4PipelineIntegration:
     @requires_gpu_int4
     def test_pipeline_uses_gpu_int4_for_mxfp4(self):
-        """GenericExpertPipeline should use GPU INT4 forward for MXFP4 layouts."""
+        """ExpertPipeline should use GPU INT4 forward for MXFP4 layouts."""
         from tinyserve.gpu_int4 import GPUINT4Forward
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
         # _build_inline_forward returns None for MXFP4
-        from tinyserve.generic_pipeline import _build_inline_forward
+        from tinyserve.expert_pipeline import _build_inline_forward
         assert _build_inline_forward(layout, F.silu) is None
 
         # _build_gpu_int4_forward should return a GPUINT4Forward-based callable
-        from tinyserve.generic_pipeline import _build_gpu_int4_forward
+        from tinyserve.expert_pipeline import _build_gpu_int4_forward
         gpu_fwd = _build_gpu_int4_forward(layout, F.silu)
         assert gpu_fwd is not None
 
     @requires_gpu_int4
     def test_gpu_int4_inline_produces_valid_output(self):
         """GPU INT4 inline forward from pipeline should produce valid output."""
-        from tinyserve.generic_pipeline import _build_gpu_int4_forward
+        from tinyserve.expert_pipeline import _build_gpu_int4_forward
 
         gu_blocks, gu_scales = _make_mxfp4_weights(2 * OUT_FEATURES, IN_FEATURES, seed=42)
         intermediate = OUT_FEATURES

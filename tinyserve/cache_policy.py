@@ -1,6 +1,6 @@
 """Pluggable eviction policies for the expert VRAM cache.
 
-All policies share the same interface so GenericLRUCache and ExpertLRUCache
+All policies share the same interface so ExpertCache and ExpertLRUCache
 can swap them at construction time with no other code changes.
 
 Policy responsibilities:

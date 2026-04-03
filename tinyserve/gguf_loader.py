@@ -495,18 +495,18 @@ def _build_expert_store_from_fused_reader(
     num_layers: int,
     num_experts: int,
     device: str | torch.device,
-) -> "GenericExpertStore | None":
-    """Build a GenericExpertStore from fused expert tensors (Qwen 3.5 style).
+) -> "ExpertStore | None":
+    """Build a ExpertStore from fused expert tensors (Qwen 3.5 style).
 
     Fused expert tensors store all experts in a single tensor per projection:
     ``blk.<L>.ffn_gate_exps.weight`` with shape ``(out_dim, in_dim, n_experts)``.
 
     This function dequants one layer at a time (memory-efficient) and slices
-    per expert, then packs into a ``GenericExpertStore``.
+    per expert, then packs into a ``ExpertStore``.
 
     Returns ``None`` when no fused expert tensors are present.
     """
-    from .generic_store import GenericExpertStore
+    from .expert_store import ExpertStore
 
     fused_layers = reader.list_fused_expert_tensors()
     if not fused_layers:
@@ -544,7 +544,7 @@ def _build_expert_store_from_fused_reader(
         # Release fused tensors immediately to bound peak RAM
         del gate_bf16, up_bf16, down_bf16
 
-    return GenericExpertStore.from_dict(expert_weights, num_layers, num_experts)
+    return ExpertStore.from_dict(expert_weights, num_layers, num_experts)
 
 
 # ---------------------------------------------------------------------------
@@ -810,7 +810,7 @@ def _build_expert_store_from_reader(
     """Build a GGUFExpertStore from parsed expert tensor groups."""
     from .gguf_quant import q4k_expert_to_int4pack
     from .gguf_store import GGUFExpertStore
-    from .generic_store import TensorLayout, _pack_tensors
+    from .expert_store import TensorLayout, _pack_tensors
 
     layers = sorted({k[0] for k in expert_groups})
     experts_per_layer = sorted({k[1] for k in expert_groups})

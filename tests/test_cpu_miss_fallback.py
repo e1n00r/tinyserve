@@ -24,8 +24,8 @@ class TinyExpert(nn.Module):
 
 
 def _make_pipeline_with_cpu(num_experts=4, hidden=16, intermediate=32):
-    from tinyserve.generic_store import GenericExpertStore, GenericLRUCache
-    from tinyserve.generic_pipeline import GenericExpertPipeline
+    from tinyserve.expert_store import ExpertStore, ExpertCache
+    from tinyserve.expert_pipeline import ExpertPipeline
     from tinyserve.cpu_expert import CPUExpertForward
 
     weights = {}
@@ -35,7 +35,7 @@ def _make_pipeline_with_cpu(num_experts=4, hidden=16, intermediate=32):
                 "gate_up_proj": torch.randn(2 * intermediate, hidden, dtype=torch.bfloat16),
                 "down_proj": torch.randn(hidden, intermediate, dtype=torch.bfloat16),
             }
-    store = GenericExpertStore.from_dict(weights, 1, num_experts)
+    store = ExpertStore.from_dict(weights, 1, num_experts)
     device = torch.device("cuda")
     template = TinyExpert(hidden, intermediate).to(device).to(torch.bfloat16)
     buf_a = store.allocate_buffer(device)
@@ -43,10 +43,10 @@ def _make_pipeline_with_cpu(num_experts=4, hidden=16, intermediate=32):
     ts = torch.cuda.Stream(device)
     cs = torch.cuda.Stream(device)
     # Small cache: capacity=2 forces misses with 4 experts
-    cache = GenericLRUCache(2, store.buffer_expert_bytes, device,
+    cache = ExpertCache(2, store.buffer_expert_bytes, device,
                             num_layers=1, num_experts=num_experts)
     cpu_fwd = CPUExpertForward(store.layout, act_fn=nn.SiLU())
-    pipeline = GenericExpertPipeline(store, template, device,
+    pipeline = ExpertPipeline(store, template, device,
                                      buf_a, buf_b, ts, cs, cache=cache)
     pipeline.cpu_expert = cpu_fwd
     pipeline.cpu_on_miss = True

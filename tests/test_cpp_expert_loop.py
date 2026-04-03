@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from tinyserve.generic_store import TensorLayout
+from tinyserve.expert_store import TensorLayout
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +204,7 @@ class TestFastForwardMatchesPython:
         assert torch.allclose(result, torch.zeros_like(result))
 
     def test_build_cpp_layout_args(self):
-        from tinyserve.generic_pipeline import _build_cpp_layout_args
+        from tinyserve.expert_pipeline import _build_cpp_layout_args
 
         layout = TensorLayout({
             "gate_up_proj": ((256, 64), torch.bfloat16),
@@ -219,7 +219,7 @@ class TestFastForwardMatchesPython:
         assert args_swiglu["activation"] == "swiglu"
 
     def test_build_cpp_layout_args_returns_none_for_mxfp4(self):
-        from tinyserve.generic_pipeline import _build_cpp_layout_args
+        from tinyserve.expert_pipeline import _build_cpp_layout_args
 
         layout = TensorLayout({
             "gate_up_proj": ((256, 64), torch.uint8),

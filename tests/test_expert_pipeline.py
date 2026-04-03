@@ -35,13 +35,13 @@ def _build_expert_weights(num_layers, num_experts, hidden, intermediate, dtype=t
 @requires_cuda
 def test_template_expert_weight_swap():
     """Swapping weights into a template expert produces correct output."""
-    from tinyserve.generic_pipeline import swap_weights_and_forward
-    from tinyserve.generic_store import GenericExpertStore
+    from tinyserve.expert_pipeline import swap_weights_and_forward
+    from tinyserve.expert_store import ExpertStore
 
     hidden, intermediate = 32, 64
     expert_weights = _build_expert_weights(1, 2, hidden, intermediate)
 
-    store = GenericExpertStore.from_dict(expert_weights, 1, 2)
+    store = ExpertStore.from_dict(expert_weights, 1, 2)
     device = torch.device("cuda")
     buf = store.allocate_buffer(device)
     template = TinySwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
@@ -69,20 +69,20 @@ def test_template_expert_weight_swap():
 @requires_cuda
 def test_generic_pipeline_matches_direct():
     """Full pipeline (cache + double-buffer) matches direct expert computation."""
-    from tinyserve.generic_pipeline import GenericExpertPipeline
-    from tinyserve.generic_store import GenericExpertStore
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertStore
 
     hidden, intermediate = 32, 64
     num_layers, num_experts, top_k = 2, 8, 2
 
     expert_weights = _build_expert_weights(num_layers, num_experts, hidden, intermediate)
-    store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts)
+    store = ExpertStore.from_dict(expert_weights, num_layers, num_experts)
     device = torch.device("cuda")
     template = TinySwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
 
-    from tinyserve.generic_store import GenericLRUCache
+    from tinyserve.expert_store import ExpertCache
 
-    pipeline = GenericExpertPipeline(
+    pipeline = ExpertPipeline(
         store,
         template,
         device,
@@ -90,7 +90,7 @@ def test_generic_pipeline_matches_direct():
         buf_b=store.allocate_buffer(device),
         transfer_stream=torch.cuda.Stream(device),
         compute_stream=torch.cuda.Stream(device),
-        cache=GenericLRUCache(4, store.expert_bytes, device),
+        cache=ExpertCache(4, store.expert_bytes, device),
     )
 
     h = torch.randn(1, hidden, device=device, dtype=torch.bfloat16)
@@ -119,18 +119,18 @@ def test_generic_pipeline_matches_direct():
 @requires_cuda
 def test_cache_hits_match_misses():
     """Second call (all cache hits) produces identical output to first call (all misses)."""
-    from tinyserve.generic_pipeline import GenericExpertPipeline
-    from tinyserve.generic_store import GenericExpertStore
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertStore
 
     hidden, intermediate = 32, 64
     expert_weights = _build_expert_weights(1, 4, hidden, intermediate)
-    store = GenericExpertStore.from_dict(expert_weights, 1, 4)
+    store = ExpertStore.from_dict(expert_weights, 1, 4)
     device = torch.device("cuda")
     template = TinySwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
 
-    from tinyserve.generic_store import GenericLRUCache
+    from tinyserve.expert_store import ExpertCache
 
-    pipeline = GenericExpertPipeline(
+    pipeline = ExpertPipeline(
         store,
         template,
         device,
@@ -138,7 +138,7 @@ def test_cache_hits_match_misses():
         buf_b=store.allocate_buffer(device),
         transfer_stream=torch.cuda.Stream(device),
         compute_stream=torch.cuda.Stream(device),
-        cache=GenericLRUCache(8, store.expert_bytes, device),
+        cache=ExpertCache(8, store.expert_bytes, device),
     )
 
     h = torch.randn(1, hidden, device=device, dtype=torch.bfloat16)
@@ -158,22 +158,22 @@ def test_cache_hits_match_misses():
 @requires_cuda
 def test_least_stale_hits_after_begin_pass():
     """LeastStalePolicy: after begin_pass(), experts from the previous token are hits."""
-    from tinyserve.generic_pipeline import GenericExpertPipeline
-    from tinyserve.generic_store import GenericExpertStore, GenericLRUCache
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertStore, ExpertCache
 
     hidden, intermediate = 32, 64
     num_layers, num_experts = 4, 8
     expert_weights = _build_expert_weights(num_layers, num_experts, hidden, intermediate)
-    store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts, fp8=True)
+    store = ExpertStore.from_dict(expert_weights, num_layers, num_experts, fp8=True)
     device = torch.device("cuda")
     template = TinySwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
 
-    cache = GenericLRUCache(32, store.buffer_expert_bytes, device, policy="ls")
+    cache = ExpertCache(32, store.buffer_expert_bytes, device, policy="ls")
     shared_transfer = torch.cuda.Stream(device)
     shared_compute = torch.cuda.Stream(device)
 
     pipelines = [
-        GenericExpertPipeline(
+        ExpertPipeline(
             store,
             template,
             device,
@@ -212,16 +212,16 @@ def test_least_stale_hits_after_begin_pass():
 @requires_cuda
 def test_multi_token():
     """Pipeline handles multiple tokens correctly."""
-    from tinyserve.generic_pipeline import GenericExpertPipeline
-    from tinyserve.generic_store import GenericExpertStore
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertStore
 
     hidden, intermediate = 32, 64
     expert_weights = _build_expert_weights(1, 8, hidden, intermediate)
-    store = GenericExpertStore.from_dict(expert_weights, 1, 8)
+    store = ExpertStore.from_dict(expert_weights, 1, 8)
     device = torch.device("cuda")
     template = TinySwiGLUExpert(hidden, intermediate).to(device).to(torch.bfloat16)
 
-    pipeline = GenericExpertPipeline(
+    pipeline = ExpertPipeline(
         store,
         template,
         device,

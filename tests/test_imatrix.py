@@ -160,7 +160,7 @@ def test_rank_experts_multi_layer():
 @requires_cuda
 def test_seed_cache_from_ranking_experts_cached():
     """Top experts land in cache; contains() returns True after seeding."""
-    from tinyserve.generic_store import GenericExpertStore, GenericLRUCache
+    from tinyserve.expert_store import ExpertStore, ExpertCache
     from tinyserve.imatrix import rank_experts_from_imatrix, seed_cache_from_ranking
 
     num_layers, num_experts = 2, 4
@@ -169,11 +169,11 @@ def test_seed_cache_from_ranking_experts_cached():
         for li in range(num_layers)
         for ei in range(num_experts)
     }
-    store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts)
+    store = ExpertStore.from_dict(expert_weights, num_layers, num_experts)
 
     # Seed with 2 experts per layer (4 total), cache has 8 slots
     device = torch.device("cuda")
-    cache = GenericLRUCache(8, store.buffer_expert_bytes, device, num_layers=num_layers, num_experts=num_experts)
+    cache = ExpertCache(8, store.buffer_expert_bytes, device, num_layers=num_layers, num_experts=num_experts)
 
     counts = {
         "blk.0.ffn_gate.0.weight": 200,
@@ -202,7 +202,7 @@ def test_seed_cache_from_ranking_experts_cached():
 @requires_cuda
 def test_seed_cache_respects_capacity():
     """seed_cache_from_ranking never overflows cache capacity."""
-    from tinyserve.generic_store import GenericExpertStore, GenericLRUCache
+    from tinyserve.expert_store import ExpertStore, ExpertCache
     from tinyserve.imatrix import rank_experts_from_imatrix, seed_cache_from_ranking
 
     num_layers, num_experts = 4, 4
@@ -211,11 +211,11 @@ def test_seed_cache_respects_capacity():
         for li in range(num_layers)
         for ei in range(num_experts)
     }
-    store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts)
+    store = ExpertStore.from_dict(expert_weights, num_layers, num_experts)
 
     # Only 3 slots — far fewer than num_layers * num_experts
     device = torch.device("cuda")
-    cache = GenericLRUCache(3, store.buffer_expert_bytes, device, num_layers=num_layers, num_experts=num_experts)
+    cache = ExpertCache(3, store.buffer_expert_bytes, device, num_layers=num_layers, num_experts=num_experts)
 
     ranking = {li: list(range(num_experts)) for li in range(num_layers)}
     n_seeded = seed_cache_from_ranking(cache, store, ranking)
@@ -226,7 +226,7 @@ def test_seed_cache_respects_capacity():
 @requires_cuda
 def test_seed_cache_slot_map_usable_after_seeding():
     """After seeding, lookup_slots returns valid slot indices for cached experts."""
-    from tinyserve.generic_store import GenericExpertStore, GenericLRUCache
+    from tinyserve.expert_store import ExpertStore, ExpertCache
     from tinyserve.imatrix import rank_experts_from_imatrix, seed_cache_from_ranking
 
     num_layers, num_experts = 1, 4
@@ -234,10 +234,10 @@ def test_seed_cache_slot_map_usable_after_seeding():
         (0, ei): {"w.weight": torch.full((4, 4), float(ei), dtype=torch.bfloat16)}
         for ei in range(num_experts)
     }
-    store = GenericExpertStore.from_dict(expert_weights, num_layers, num_experts)
+    store = ExpertStore.from_dict(expert_weights, num_layers, num_experts)
 
     device = torch.device("cuda")
-    cache = GenericLRUCache(4, store.buffer_expert_bytes, device, num_layers=num_layers, num_experts=num_experts)
+    cache = ExpertCache(4, store.buffer_expert_bytes, device, num_layers=num_layers, num_experts=num_experts)
     ranking = {0: [0, 1, 2, 3]}
     seed_cache_from_ranking(cache, store, ranking)
 

@@ -11,7 +11,7 @@ from tinyserve.cpu_expert import (
     HAS_INT4_CPU,
     mxfp4_to_int4pack,
 )
-from tinyserve.generic_store import TensorLayout, _pack_tensors
+from tinyserve.expert_store import TensorLayout, _pack_tensors
 from tinyserve.mxfp4 import dequant_mxfp4_no_transpose
 
 requires_int4 = pytest.mark.skipif(not HAS_INT4_CPU, reason="INT4 CPU ops not available")

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 from tests.conftest import requires_cuda
 from tinyserve.cpu_expert import CPUExpertForward
-from tinyserve.generic_store import GenericExpertStore, TensorLayout, _pack_tensors
+from tinyserve.expert_store import ExpertStore, TensorLayout, _pack_tensors
 from tinyserve.ram_cache import RAMCache, madvise_willneed
 
 
@@ -30,7 +30,7 @@ def _make_store_and_weights():
         (0, 0): {"gate_up_proj": w_gu, "down_proj": w_dn},
         (0, 1): {"gate_up_proj": w_gu * 0.5, "down_proj": w_dn * 0.5},
     }
-    store = GenericExpertStore.from_dict(weights, num_layers=1, num_experts=2)
+    store = ExpertStore.from_dict(weights, num_layers=1, num_experts=2)
     return store, layout, w_gu, w_dn
 
 
@@ -91,8 +91,8 @@ class TestCPUForwardFromStore:
 class TestPipelineCPUExpert:
     @requires_cuda
     def test_cpu_expert_matches_gpu_pipeline(self):
-        from tinyserve.generic_pipeline import GenericExpertPipeline
-        from tinyserve.generic_store import GenericExpertBuffer
+        from tinyserve.expert_pipeline import ExpertPipeline
+        from tinyserve.expert_store import ExpertBuffer
 
         torch.manual_seed(42)
         store, layout, w_gu, w_dn = _make_store_and_weights()
@@ -121,7 +121,7 @@ class TestPipelineCPUExpert:
         compute_stream = torch.cuda.Stream(device)
 
         # Pipeline WITHOUT cpu_expert (GPU-only).
-        gpu_pipeline = GenericExpertPipeline(
+        gpu_pipeline = ExpertPipeline(
             store, template, device,
             buf_a=buf_a, buf_b=buf_b,
             transfer_stream=transfer_stream,
@@ -137,7 +137,7 @@ class TestPipelineCPUExpert:
         # Pipeline WITH cpu_expert.
         ram = RAMCache(num_slots=4, expert_bytes=layout.total_bytes)
         cpu_fwd = CPUExpertForward(layout, act_fn=F.silu, num_threads=1)
-        cpu_pipeline = GenericExpertPipeline(
+        cpu_pipeline = ExpertPipeline(
             store, template, device,
             buf_a=buf_a, buf_b=buf_b,
             transfer_stream=transfer_stream,
@@ -290,7 +290,7 @@ class TestAutoPinnedVsMmap:
             with open(os.path.join(model_dir, "model.safetensors.index.json"), "w") as f:
                 json.dump({"weight_map": weight_map}, f)
 
-            result = GenericExpertStore.from_safetensors(
+            result = ExpertStore.from_safetensors(
                 model_dir, "mlp", "experts", list(range(num_layers)),
                 disk_offload=True,
             )
@@ -344,7 +344,7 @@ class TestAutoPinnedVsMmap:
                 return original_sysconf(name)
 
             with patch("os.sysconf", side_effect=fake_sysconf):
-                result = GenericExpertStore.from_safetensors(
+                result = ExpertStore.from_safetensors(
                     model_dir, "mlp", "experts", list(range(num_layers)),
                     disk_offload=True,
                 )

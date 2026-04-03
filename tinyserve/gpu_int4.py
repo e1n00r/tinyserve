@@ -12,7 +12,7 @@ Graceful fallback: HAS_INT4_GPU is False if ops or CUDA unavailable.
 
 import torch
 
-from .generic_store import TensorLayout
+from .expert_store import TensorLayout
 
 HAS_INT4_GPU = (
     hasattr(torch, "_weight_int4pack_mm")

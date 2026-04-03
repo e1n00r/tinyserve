@@ -5,9 +5,9 @@ import pytest
 
 
 def _make_cache(capacity=4, num_layers=3, num_experts=8, device="cpu"):
-    from tinyserve.generic_store import GenericLRUCache
+    from tinyserve.expert_store import ExpertCache
     expert_bytes = 64
-    cache = GenericLRUCache(capacity, expert_bytes, torch.device(device),
+    cache = ExpertCache(capacity, expert_bytes, torch.device(device),
                             num_layers=num_layers, num_experts=num_experts)
     return cache
 

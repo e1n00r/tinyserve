@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from tests.conftest import requires_cuda
 from tinyserve.cpu_expert import CPUExpertForward
-from tinyserve.generic_store import TensorLayout, _pack_tensors
+from tinyserve.expert_store import TensorLayout, _pack_tensors
 
 
 HIDDEN = 64

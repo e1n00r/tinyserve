@@ -15,7 +15,7 @@ _weight_int4pack_mm_for_cpu for fast CPU inference.
 import torch
 import torch.nn.functional as F
 
-from .generic_store import TensorLayout
+from .expert_store import TensorLayout
 
 HAS_INT4_CPU = hasattr(torch.ops.aten, "_weight_int4pack_mm_for_cpu") and hasattr(
     torch.ops.aten, "_convert_weight_to_int4pack_for_cpu"
