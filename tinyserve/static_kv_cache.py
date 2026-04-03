@@ -75,6 +75,7 @@ class StaticKVCache:
             self._v = self._v.pin_memory()
         self._seq_lens = [0] * num_layers
         self.is_sliding = [False] * num_layers
+        self._sliding_window: int | None = None
         self._vram_budget = None  # Set by offload.py when VRAMBudget is created
 
     @classmethod
@@ -83,7 +84,7 @@ class StaticKVCache:
         head_dim = getattr(effective, "head_dim", None)
         if head_dim is None:
             head_dim = effective.hidden_size // effective.num_attention_heads
-        return cls(
+        cache = cls(
             max_seq_len=max_seq_len,
             num_layers=effective.num_hidden_layers,
             num_kv_heads=effective.num_key_value_heads,
@@ -92,6 +93,18 @@ class StaticKVCache:
             dtype=dtype,
             storage_device=torch.device(storage_device) if storage_device is not None else None,
         )
+        sliding_window = getattr(effective, "sliding_window", None)
+        layer_types = getattr(effective, "layer_types", None)
+        if sliding_window is not None and layer_types is not None:
+            cache._sliding_window = sliding_window
+            cache.is_sliding = [
+                lt == "sliding_attention"
+                for lt in layer_types[: effective.num_hidden_layers]
+            ]
+        elif sliding_window is not None:
+            cache._sliding_window = sliding_window
+            cache.is_sliding = [True] * effective.num_hidden_layers
+        return cache
 
     @staticmethod
     def bytes_per_token(num_layers, num_kv_heads, head_dim, dtype=torch.bfloat16):
@@ -149,8 +162,19 @@ class StaticKVCache:
             k_out = self._k[layer_idx, :, :, : self.max_seq_len]
             v_out = self._v[layer_idx, :, :, : self.max_seq_len]
         else:
-            k_out = self._k[layer_idx, :, :, : self._seq_lens[layer_idx]]
-            v_out = self._v[layer_idx, :, :, : self._seq_lens[layer_idx]]
+            seq_len = self._seq_lens[layer_idx]
+            if (
+                self._storage_device != self._compute_device
+                and self.is_sliding[layer_idx]
+                and self._sliding_window is not None
+                and seq_len > self._sliding_window
+            ):
+                window_start = seq_len - self._sliding_window
+                k_out = self._k[layer_idx, :, :, window_start:seq_len]
+                v_out = self._v[layer_idx, :, :, window_start:seq_len]
+            else:
+                k_out = self._k[layer_idx, :, :, :seq_len]
+                v_out = self._v[layer_idx, :, :, :seq_len]
         needs_device_transfer = self._storage_device != self._compute_device
         needs_dtype_cast = self._dtype != self._compute_dtype
         if needs_device_transfer or needs_dtype_cast:

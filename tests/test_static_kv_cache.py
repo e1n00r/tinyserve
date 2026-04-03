@@ -279,3 +279,122 @@ def test_static_shapes_default_off():
     k_out, _ = cache.update(k, v, 0, {"cache_position": torch.arange(5)})
     # Default: returns sliced tensors
     assert k_out.shape == (1, 2, 5, 4)
+
+
+def test_from_model_config_sliding_window_with_layer_types():
+    """from_model_config populates is_sliding and _sliding_window from layer_types."""
+    class FakeConfig:
+        num_hidden_layers = 4
+        num_key_value_heads = 2
+        num_attention_heads = 4
+        hidden_size = 32
+        head_dim = 8
+        sliding_window = 16
+        layer_types = [
+            "sliding_attention", "full_attention",
+            "sliding_attention", "full_attention",
+        ]
+
+    cache = StaticKVCache.from_model_config(
+        FakeConfig(), max_seq_len=64, device="cpu", dtype=torch.bfloat16,
+    )
+    assert cache._sliding_window == 16
+    assert cache.is_sliding == [True, False, True, False]
+
+
+def test_from_model_config_sliding_window_no_layer_types():
+    """from_model_config marks all layers sliding when no layer_types present."""
+    class FakeConfig:
+        num_hidden_layers = 3
+        num_key_value_heads = 2
+        num_attention_heads = 4
+        hidden_size = 32
+        head_dim = 8
+        sliding_window = 32
+
+    cache = StaticKVCache.from_model_config(
+        FakeConfig(), max_seq_len=64, device="cpu", dtype=torch.bfloat16,
+    )
+    assert cache._sliding_window == 32
+    assert cache.is_sliding == [True, True, True]
+
+
+def test_from_model_config_no_sliding_window():
+    """from_model_config leaves is_sliding all False when no sliding_window."""
+    class FakeConfig:
+        num_hidden_layers = 2
+        num_key_value_heads = 2
+        num_attention_heads = 4
+        hidden_size = 32
+        head_dim = 8
+
+    cache = StaticKVCache.from_model_config(
+        FakeConfig(), max_seq_len=64, device="cpu", dtype=torch.bfloat16,
+    )
+    assert cache._sliding_window is None
+    assert cache.is_sliding == [False, False]
+
+
+def test_cpu_offload_sliding_layer_returns_window_tokens():
+    """CPU-offload sliding layer returns only window tokens, not full sequence.
+
+    Uses device='meta' as the compute device so that storage (cpu) != compute
+    (meta), triggering the bandwidth-reduction path without a real GPU.
+    The meta device accepts .to() calls and preserves shape, making it
+    suitable for verifying slice dimensions.
+    """
+    window = 4
+    cache = StaticKVCache(
+        max_seq_len=32, num_layers=2, num_kv_heads=2,
+        head_dim=4, device=torch.device("meta"), dtype=torch.bfloat16,
+        storage_device=torch.device("cpu"),
+    )
+    cache._sliding_window = window
+    cache.is_sliding = [True, False]
+
+    k = torch.randn(1, 2, 10, 4, dtype=torch.bfloat16)
+    v = torch.randn(1, 2, 10, 4, dtype=torch.bfloat16)
+
+    # Sliding layer: must return only the last `window` tokens
+    k_out, v_out = cache.update(k, v, layer_idx=0)
+    assert k_out.shape == (1, 2, window, 4), f"Expected window={window}, got {k_out.shape[2]}"
+    assert v_out.shape == (1, 2, window, 4)
+
+    # Full-attention layer: must return all 10 tokens
+    k_out2, v_out2 = cache.update(k, v, layer_idx=1)
+    assert k_out2.shape == (1, 2, 10, 4)
+
+
+def test_cpu_offload_sliding_layer_seq_within_window_returns_all():
+    """When seq_len <= window, sliding layer still returns all tokens."""
+    window = 16
+    cache = StaticKVCache(
+        max_seq_len=32, num_layers=1, num_kv_heads=2,
+        head_dim=4, device=torch.device("meta"), dtype=torch.bfloat16,
+        storage_device=torch.device("cpu"),
+    )
+    cache._sliding_window = window
+    cache.is_sliding = [True]
+
+    # Prefill 8 tokens (< window)
+    k = torch.randn(1, 2, 8, 4, dtype=torch.bfloat16)
+    v = torch.randn(1, 2, 8, 4, dtype=torch.bfloat16)
+    k_out, v_out = cache.update(k, v, layer_idx=0)
+    assert k_out.shape == (1, 2, 8, 4)
+
+
+def test_no_offload_sliding_layer_returns_full_seq():
+    """Without CPU offload, sliding layer always returns full sequence (SDPA slices later)."""
+    window = 4
+    cache = StaticKVCache(
+        max_seq_len=32, num_layers=1, num_kv_heads=2,
+        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+    )
+    cache._sliding_window = window
+    cache.is_sliding = [True]
+
+    k = torch.randn(1, 2, 10, 4, dtype=torch.bfloat16)
+    v = torch.randn(1, 2, 10, 4, dtype=torch.bfloat16)
+    k_out, v_out = cache.update(k, v, layer_idx=0)
+    # storage == compute (both cpu), so no bandwidth optimization — full seq returned
+    assert k_out.shape == (1, 2, 10, 4)
