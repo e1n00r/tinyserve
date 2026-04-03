@@ -347,7 +347,7 @@ def offload_model(
     model = model.to(device).to(torch.bfloat16)
 
     # Allocate KV cache first (if requested), then give remainder to expert cache.
-    from .expert_store import ExpertCache
+    from .expert_cache import ExpertCache
     from .static_kv_cache import StaticKVCache
 
     buf_bytes = store.buffer_expert_bytes

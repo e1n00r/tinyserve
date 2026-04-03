@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .expert_store import ExpertBuffer, ExpertStore, ExpertCache
+from .expert_store import ExpertBuffer, ExpertStore
+from .expert_cache import ExpertCache
 from .profiler import OffloadProfiler
 from .ram_cache import madvise_willneed
 
