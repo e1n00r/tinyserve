@@ -1,0 +1,64 @@
+MXFP4 quantization requires the `kernels` package: `pip install kernels>=0.12.0`. We will default to dequantizing the model to bf16.
+=== StreamingLLM Window Size Sweep ===
+Loading weights:   0%|          | 0/411 [00:00<?, ?it/s]Loading weights:   1%|          | 5/411 [00:00<00:41,  9.81it/s]Loading weights:   2%|▏         | 7/411 [00:01<01:55,  3.49it/s]Loading weights:   5%|▌         | 22/411 [00:02<00:34, 11.20it/s]Loading weights:   6%|▌         | 24/411 [00:03<01:01,  6.26it/s]Loading weights:   9%|▉         | 39/411 [00:04<00:34, 10.94it/s]Loading weights:  10%|▉         | 41/411 [00:05<00:52,  7.00it/s]Loading weights:  14%|█▎        | 56/411 [00:05<00:31, 11.33it/s]Loading weights:  14%|█▍        | 58/411 [00:07<00:47,  7.43it/s]Loading weights:  18%|█▊        | 73/411 [00:07<00:29, 11.49it/s]Loading weights:  18%|█▊        | 75/411 [00:08<00:43,  7.78it/s]Loading weights:  22%|██▏       | 90/411 [00:09<00:26, 11.97it/s]Loading weights:  22%|██▏       | 92/411 [00:10<00:39,  8.12it/s]Loading weights:  26%|██▌       | 107/411 [00:11<00:25, 12.11it/s]Loading weights:  27%|██▋       | 109/411 [00:12<00:37,  8.05it/s]Loading weights:  30%|███       | 124/411 [00:12<00:23, 11.96it/s]Loading weights:  31%|███       | 126/411 [00:13<00:35,  8.05it/s]Loading weights:  34%|███▍      | 141/411 [00:14<00:22, 12.04it/s]Loading weights:  35%|███▍      | 143/411 [00:15<00:32,  8.16it/s]Loading weights:  38%|███▊      | 158/411 [00:16<00:20, 12.12it/s]Loading weights:  39%|███▉      | 160/411 [00:17<00:30,  8.26it/s]Loading weights:  43%|████▎     | 175/411 [00:17<00:19, 12.11it/s]Loading weights:  43%|████▎     | 177/411 [00:19<00:29,  7.97it/s]Loading weights:  47%|████▋     | 192/411 [00:19<00:18, 11.74it/s]Loading weights:  47%|████▋     | 194/411 [00:20<00:27,  7.96it/s]Loading weights:  51%|█████     | 209/411 [00:21<00:17, 11.79it/s]Loading weights:  51%|█████▏    | 211/411 [00:22<00:25,  7.99it/s]Loading weights:  55%|█████▍    | 226/411 [00:23<00:16, 11.56it/s]Loading weights:  55%|█████▌    | 228/411 [00:24<00:23,  7.66it/s]Loading weights:  59%|█████▉    | 243/411 [00:25<00:14, 11.29it/s]Loading weights:  60%|█████▉    | 245/411 [00:26<00:21,  7.63it/s]Loading weights:  63%|██████▎   | 260/411 [00:26<00:13, 11.45it/s]Loading weights:  64%|██████▎   | 262/411 [00:28<00:19,  7.64it/s]Loading weights:  67%|██████▋   | 277/411 [00:28<00:11, 11.39it/s]Loading weights:  68%|██████▊   | 279/411 [00:29<00:17,  7.54it/s]Loading weights:  72%|███████▏  | 294/411 [00:30<00:10, 11.32it/s]Loading weights:  72%|███████▏  | 296/411 [00:31<00:15,  7.59it/s]Loading weights:  76%|███████▌  | 311/411 [00:32<00:08, 11.41it/s]Loading weights:  76%|███████▌  | 313/411 [00:33<00:12,  7.91it/s]Loading weights:  80%|███████▉  | 328/411 [00:33<00:06, 11.89it/s]Loading weights:  80%|████████  | 330/411 [00:35<00:10,  7.84it/s]Loading weights:  84%|████████▍ | 345/411 [00:35<00:05, 11.65it/s]Loading weights:  84%|████████▍ | 347/411 [00:37<00:08,  7.63it/s]Loading weights:  88%|████████▊ | 362/411 [00:37<00:04, 11.41it/s]Loading weights:  89%|████████▊ | 364/411 [00:38<00:06,  7.45it/s]Loading weights:  92%|█████████▏| 379/411 [00:39<00:02, 11.02it/s]Loading weights:  93%|█████████▎| 381/411 [00:40<00:03,  7.53it/s]Loading weights:  96%|█████████▋| 396/411 [00:41<00:01, 11.26it/s]Loading weights:  97%|█████████▋| 398/411 [00:42<00:01,  7.55it/s]Loading weights: 100%|██████████| 411/411 [00:42<00:00,  9.65it/s]
+Fetching 17 files:   0%|          | 0/17 [00:00<?, ?it/s]Fetching 17 files: 100%|██████████| 17/17 [00:00<00:00, 36678.58it/s]
+Traceback (most recent call last):
+  File "<stdin>", line 34, in <module>
+  File "/home/elnur/.local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/transformers/utils/generic.py", line 876, in wrapper
+    output = func(self, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/transformers/models/gpt_oss/modeling_gpt_oss.py", line 649, in forward
+    outputs: MoeModelOutputWithPast = self.model(
+                                      ^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/transformers/utils/generic.py", line 952, in wrapper
+    output = func(self, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/transformers/utils/output_capturing.py", line 248, in wrapper
+    outputs = func(self, *args, **kwargs)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/transformers/models/gpt_oss/modeling_gpt_oss.py", line 490, in forward
+    hidden_states = decoder_layer(
+                    ^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/transformers/modeling_layers.py", line 93, in __call__
+    return super().__call__(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/transformers/models/gpt_oss/modeling_gpt_oss.py", line 370, in forward
+    hidden_states, _ = self.self_attn(
+                       ^^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/.local/lib/python3.12/site-packages/transformers/models/gpt_oss/modeling_gpt_oss.py", line 324, in forward
+    key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/gpt-oss-offload/tinyserve/static_kv_cache.py", line 145, in update
+    if self._vram_budget.handle_overflow(end - self.max_seq_len):
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/gpt-oss-offload/tinyserve/vram_budget.py", line 59, in handle_overflow
+    freed_bytes = self.expert_cache.shrink(slots_to_free)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/elnur/gpt-oss-offload/tinyserve/expert_cache.py", line 237, in shrink
+    self._packed = self._packed[:new_capacity].clone()
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.91 GiB. GPU 0 has a total capacity of 7.54 GiB of which 802.19 MiB is free. Including non-PyTorch memory, this process has 6.71 GiB memory in use. Of the allocated memory 6.42 GiB is allocated by PyTorch, and 100.49 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
