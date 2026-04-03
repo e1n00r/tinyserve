@@ -398,3 +398,145 @@ def test_no_offload_sliding_layer_returns_full_seq():
     k_out, v_out = cache.update(k, v, layer_idx=0)
     # storage == compute (both cpu), so no bandwidth optimization — full seq returned
     assert k_out.shape == (1, 2, 10, 4)
+
+
+# ---------------------------------------------------------------------------
+# StreamingLLM eviction tests
+# ---------------------------------------------------------------------------
+
+def test_streaming_eviction_self_heals_on_overflow():
+    """update() self-heals via streaming eviction when cache would overflow.
+
+    Scenario: max_seq_len=256, window=200, sink=4.
+    After the first 256 tokens, the next write would overflow.
+    With streaming enabled, update() must evict and compact first,
+    then write the new tokens without raising KVCacheOverflow.
+
+    This reproduces the GPU KV + StreamingLLM index-out-of-bounds bug:
+    previously _evict_streaming was dead code (never called from update()),
+    so chunked prefill at >256 ctx raised KVCacheOverflow.
+    """
+    max_seq_len = 256
+    sink = 4
+    window = 200
+    cache = StaticKVCache(
+        max_seq_len=max_seq_len, num_layers=1, num_kv_heads=2,
+        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+    )
+    cache.enable_streaming(sink_size=sink, window_size=window)
+
+    # Fill the cache to capacity (256 tokens in two chunks)
+    k_fill = torch.randn(1, 2, max_seq_len, 4, dtype=torch.bfloat16)
+    v_fill = torch.randn(1, 2, max_seq_len, 4, dtype=torch.bfloat16)
+    cache.update(k_fill, v_fill, layer_idx=0)
+    assert cache.get_seq_length(0) == max_seq_len
+
+    # This next write (50 more tokens) would overflow — but streaming must self-heal.
+    k_new = torch.randn(1, 2, 50, 4, dtype=torch.bfloat16)
+    v_new = torch.randn(1, 2, 50, 4, dtype=torch.bfloat16)
+    # Must NOT raise KVCacheOverflow
+    k_out, v_out = cache.update(k_new, v_new, layer_idx=0)
+
+    # After eviction + write, seq_len = sink + window (compacted) + 50 new tokens
+    expected_len = sink + window + 50
+    assert cache.get_seq_length(0) == expected_len, (
+        f"Expected seq_len={expected_len}, got {cache.get_seq_length(0)}"
+    )
+    # Returned KV must include all tokens written so far
+    assert k_out.shape[2] == expected_len
+
+
+def test_streaming_eviction_repeated_overflow_self_heals():
+    """Multiple overflows in sequence all self-heal via streaming eviction."""
+    max_seq_len = 256
+    sink = 4
+    window = 200
+    cache = StaticKVCache(
+        max_seq_len=max_seq_len, num_layers=1, num_kv_heads=2,
+        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+    )
+    cache.enable_streaming(sink_size=sink, window_size=window)
+
+    # Fill cache twice (each time eviction re-compacts to sink+window=204)
+    chunk_size = 52  # sink(4) + window(200) + chunk(52) = 256 exactly fills max_seq_len
+    for _ in range(5):
+        k = torch.randn(1, 2, chunk_size, 4, dtype=torch.bfloat16)
+        v = torch.randn(1, 2, chunk_size, 4, dtype=torch.bfloat16)
+        cache.update(k, v, layer_idx=0)
+
+    # After 5 chunks of 52: after first fills to 256, evicts to 204, adds 52 → 256,
+    # evicts to 204, etc. Final seq_len depends on last evict + last chunk.
+    # Crucially: no KVCacheOverflow raised during any of these.
+    assert cache.get_seq_length(0) <= max_seq_len
+
+
+def test_streaming_eviction_preserves_sink_tokens():
+    """After eviction, sink tokens are still at positions 0..sink_size.
+
+    Uses a small cache (max_seq_len=30) with sink=4, window=20 (max_kept=24).
+    Fills 30 tokens then writes 5 more — must self-heal via eviction and
+    sink tokens (first 4) must survive intact.
+    """
+    max_seq_len = 30
+    sink = 4
+    window = 20
+    cache = StaticKVCache(
+        max_seq_len=max_seq_len, num_layers=1, num_kv_heads=2,
+        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+    )
+    cache.enable_streaming(sink_size=sink, window_size=window)
+
+    # Fill cache with tokens 0..29, each token i has value i in all dims
+    k_fill = torch.stack([
+        torch.full((1, 2, 1, 4), float(i), dtype=torch.bfloat16)
+        for i in range(max_seq_len)
+    ], dim=2).squeeze(3)  # shape [1, 2, 30, 4]
+    v_fill = torch.zeros(1, 2, max_seq_len, 4, dtype=torch.bfloat16)
+    cache.update(k_fill, v_fill, layer_idx=0)
+    assert cache.get_seq_length(0) == max_seq_len
+
+    # Now write 5 more tokens — this must trigger streaming eviction
+    k_new = torch.full((1, 2, 5, 4), 99.0, dtype=torch.bfloat16)
+    v_new = torch.zeros(1, 2, 5, 4, dtype=torch.bfloat16)
+    cache.update(k_new, v_new, layer_idx=0)  # must NOT raise
+
+    # After eviction, sink tokens (positions 0..3) must still hold values 0..3.
+    # cache._k shape: [layers, batch, heads, seq, head_dim]
+    k_cached = cache._k[0, 0, 0, :sink, 0]  # first head_dim element for each sink pos
+    for i in range(sink):
+        assert float(k_cached[i]) == pytest.approx(float(i), abs=0.1), (
+            f"Sink token {i} corrupted: expected {i}, got {float(k_cached[i])}"
+        )
+
+
+def test_streaming_disabled_still_raises_overflow():
+    """Without streaming, overflow still raises KVCacheOverflow as before."""
+    from tinyserve.static_kv_cache import KVCacheOverflow
+    cache = StaticKVCache(
+        max_seq_len=10, num_layers=1, num_kv_heads=2,
+        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+    )
+    k = torch.randn(1, 2, 15, 4, dtype=torch.bfloat16)
+    v = torch.randn(1, 2, 15, 4, dtype=torch.bfloat16)
+    with pytest.raises(KVCacheOverflow):
+        cache.update(k, v, layer_idx=0)
+
+
+def test_streaming_no_eviction_when_below_capacity():
+    """Streaming enabled but seq_len < max_kept: no eviction, normal behaviour."""
+    max_seq_len = 256
+    sink = 4
+    window = 200
+    cache = StaticKVCache(
+        max_seq_len=max_seq_len, num_layers=1, num_kv_heads=2,
+        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+    )
+    cache.enable_streaming(sink_size=sink, window_size=window)
+
+    k = torch.randn(1, 2, 50, 4, dtype=torch.bfloat16)
+    v = torch.randn(1, 2, 50, 4, dtype=torch.bfloat16)
+    k_out, v_out = cache.update(k, v, layer_idx=0)
+
+    # No eviction: seq_len == 50, returned shape == 50
+    assert cache.get_seq_length(0) == 50
+    assert k_out.shape == (1, 2, 50, 4)
