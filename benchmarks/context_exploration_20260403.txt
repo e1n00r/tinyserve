@@ -1,0 +1,28 @@
+=== Context Length Exploration Results (2026-04-03) ===
+
+Hardware: RTX PRO 2000 8GB, GPT-OSS-20B (MXFP4), 64GB RAM
+
+Techniques explored:
+1. CPU KV offload (FP8) — extends context, costs speed
+2. Sliding window pre-transfer — modest bandwidth savings
+3. Head-wise attention (HeadInfer pattern) — enables 30K, very slow
+4. StreamingLLM (sink=4 + window=1024) — constant 18 tok/s at any length
+5. H2O Heavy Hitter Oracle — implemented, not benchmarked (needs attn weight wiring)
+6. Dynamic VRAM rebalancing — works but GPU KV limited to 250 tokens
+7. Chunked prefill (chunk=256-512) — required for >2K prefill
+
+Results:
+
+| Config                              | 100ctx | 1K  | 4K   | 8K   | 16K  | 30K  |
+|--------------------------------------|--------|-----|------|------|------|------|
+| GPU KV (no offload), 237 slots       | 7.1    | 3.5 | 1.8  | OOM  | OOM  | OOM  |
+| CPU KV FP8, 177 slots                | 4.6    | 2.9 | 1.2  | 0.6  | 0.5  | 0.4  |
+| + Head-wise attn, 100 slots          | 1.6    | 0.4 | 0.11 | 0.05 | 0.03 | 0.02 |
+| StreamingLLM (w=1024), 234 slots     | 9.5    | 14  | 16   | 17   | 14   | 18   |
+
+Key findings:
+- StreamingLLM gives CONSTANT 14-18 tok/s regardless of context (KV capped at 1028)
+- Full KV retention at 30K context: achievable (0.02 tok/s) but impractical
+- GPU KV limited to 250 tokens on this hardware (expert cache uses most VRAM)
+- Head-wise attention prevents attention OOM but doesn't help with transfer bottleneck
+- The transfer bottleneck (CPU→GPU KV) dominates at >2K context with full retention
