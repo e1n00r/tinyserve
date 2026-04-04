@@ -331,6 +331,19 @@ def open_gguf(path: str | Path) -> MultiShardGGUFReader | GGUFReader:
     Otherwise a single GGUFReader is returned.
     """
     p = Path(path)
+
+    # Handle directory input: discover GGUF files inside
+    if p.is_dir():
+        candidates = sorted(p.glob("*-*-of-*.gguf"))
+        if len(candidates) > 1:
+            return MultiShardGGUFReader(candidates)
+        candidates = sorted(p.glob("*.gguf"))
+        if len(candidates) == 1:
+            return GGUFReader(candidates[0])
+        if candidates:
+            return MultiShardGGUFReader(candidates)
+        raise FileNotFoundError(f"No GGUF files found in {p}")
+
     shard_pattern = re.compile(r"^(.+)-(\d{5})-of-(\d{5})\.gguf$")
     m = shard_pattern.match(p.name)
     if m:

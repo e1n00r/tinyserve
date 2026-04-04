@@ -188,42 +188,53 @@ def _build_expert_store_from_fused_reader(
 
     Returns ``None`` when no fused expert tensors are present.
     """
-    from .expert_store import ExpertStore
+    from .expert_store import ExpertStore, TensorLayout
 
     fused_layers = reader.list_fused_expert_tensors()
     if not fused_layers:
         return None
 
     layers = sorted(fused_layers.keys())
-    expert_weights: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
 
-    for layer_idx in layers:
+    # Probe first layer to determine layout and pre-allocate final tensor.
+    first_tensors = fused_layers[layers[0]]
+    probe_gate = _dequant_fused_tensor(reader, first_tensors["gate"], f"blk.{layers[0]}.ffn_gate_exps.weight", "cpu")
+    probe_up = _dequant_fused_tensor(reader, first_tensors["up"], f"blk.{layers[0]}.ffn_up_exps.weight", "cpu")
+    probe_down = _dequant_fused_tensor(reader, first_tensors["down"], f"blk.{layers[0]}.ffn_down_exps.weight", "cpu")
+    gate_up_0 = torch.cat([probe_gate[:, :, 0], probe_up[:, :, 0]], dim=0)
+    sample = {"gate_up_proj": gate_up_0.to(torch.bfloat16), "down_proj": probe_down[:, :, 0].to(torch.bfloat16)}
+    layout = TensorLayout.from_tensors(sample)
+
+    # Pre-allocate the final pinned tensor. Peak RAM = this + one layer of fused tensors.
+    data = torch.empty(num_layers, num_experts, layout.total_bytes, dtype=torch.uint8).pin_memory()
+
+    def _pack_expert(layer_idx: int, expert_idx: int, tensors: dict[str, torch.Tensor]):
+        offset = 0
+        for name, tensor in tensors.items():
+            raw = tensor.contiguous().view(-1).view(torch.uint8)
+            data[layer_idx, expert_idx, offset: offset + raw.numel()] = raw
+            offset += raw.numel()
+
+    # Pack first layer (already dequanted)
+    n_exp = probe_gate.shape[2]
+    for ei in range(n_exp):
+        gate_up = torch.cat([probe_gate[:, :, ei], probe_up[:, :, ei]], dim=0).to(torch.bfloat16)
+        down = probe_down[:, :, ei].to(torch.bfloat16)
+        _pack_expert(layers[0], ei, {"gate_up_proj": gate_up, "down_proj": down})
+    del probe_gate, probe_up, probe_down
+
+    # Stream remaining layers: dequant one layer, pack, release.
+    for layer_idx in layers[1:]:
         layer_tensors = fused_layers[layer_idx]
+        gate_bf16 = _dequant_fused_tensor(reader, layer_tensors["gate"], f"blk.{layer_idx}.ffn_gate_exps.weight", "cpu")
+        up_bf16 = _dequant_fused_tensor(reader, layer_tensors["up"], f"blk.{layer_idx}.ffn_up_exps.weight", "cpu")
+        down_bf16 = _dequant_fused_tensor(reader, layer_tensors["down"], f"blk.{layer_idx}.ffn_down_exps.weight", "cpu")
 
-        gate_name = f"blk.{layer_idx}.ffn_gate_exps.weight"
-        up_name = f"blk.{layer_idx}.ffn_up_exps.weight"
-        down_name = f"blk.{layer_idx}.ffn_down_exps.weight"
+        for ei in range(gate_bf16.shape[2]):
+            gate_up = torch.cat([gate_bf16[:, :, ei], up_bf16[:, :, ei]], dim=0).to(torch.bfloat16)
+            down = down_bf16[:, :, ei].to(torch.bfloat16)
+            _pack_expert(layer_idx, ei, {"gate_up_proj": gate_up, "down_proj": down})
 
-        # Dequant full fused tensors on CPU first (shape: [out, in, n_experts])
-        gate_bf16 = _dequant_fused_tensor(reader, layer_tensors["gate"], gate_name, "cpu")
-        up_bf16 = _dequant_fused_tensor(reader, layer_tensors["up"], up_name, "cpu")
-        down_bf16 = _dequant_fused_tensor(reader, layer_tensors["down"], down_name, "cpu")
-
-        n_exp = gate_bf16.shape[2]
-
-        for expert_idx in range(n_exp):
-            gate_e = gate_bf16[:, :, expert_idx]  # [intermediate, hidden]
-            up_e = up_bf16[:, :, expert_idx]  # [intermediate, hidden]
-            down_e = down_bf16[:, :, expert_idx]  # [hidden, intermediate]
-
-            gate_up = torch.cat([gate_e, up_e], dim=0)  # [2*intermediate, hidden]
-
-            expert_weights[(layer_idx, expert_idx)] = {
-                "gate_up_proj": gate_up.to(torch.bfloat16),
-                "down_proj": down_e.to(torch.bfloat16),
-            }
-
-        # Release fused tensors immediately to bound peak RAM
         del gate_bf16, up_bf16, down_bf16
 
-    return ExpertStore.from_dict(expert_weights, num_layers, num_experts)
+    return ExpertStore(data, layout, num_layers, num_experts)
