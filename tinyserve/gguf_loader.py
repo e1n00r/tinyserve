@@ -522,9 +522,13 @@ def load_from_gguf(
         from .qwen35moe_mapper import map_gguf_to_hf as _map_name
         logger.info("Using Qwen3.5MoE-specific GGUF mapper")
     else:
+        # Qwen models store norm weights as w-1 in GGUF (need +1)
+        _needs_norm_offset = arch.startswith("qwen")
+
         def _map_name(gguf_name):
             hf, is_expert, _, _ = gguf_to_hf_name(gguf_name)
-            return hf, False, is_expert, None
+            is_norm = "norm" in gguf_name and gguf_name.endswith(".weight")
+            return hf, _needs_norm_offset and is_norm, is_expert, None
 
     # Extract linear_attn head config for V-head reorder transforms (Qwen3.5MoE).
     # These come from the HF config; defaults are safe for non-Qwen3.5 models

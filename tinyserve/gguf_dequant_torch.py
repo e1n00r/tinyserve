@@ -50,10 +50,18 @@ def dequant_tensor(
     Raises:
         ValueError: If ggml_type is not supported.
     """
+    # F32 and F16: trivial, just reinterpret bytes
+    if ggml_type == 0:  # F32
+        raw = data if isinstance(data, (bytes, bytearray)) else data.numpy().tobytes()
+        return torch.frombuffer(bytearray(raw), dtype=torch.float32).reshape(shape)
+    if ggml_type == 1:  # F16
+        raw = data if isinstance(data, (bytes, bytearray)) else data.numpy().tobytes()
+        return torch.frombuffer(bytearray(raw), dtype=torch.float16).float().reshape(shape)
+
     if ggml_type not in _QUANT_SIZES:
         raise ValueError(
             f"Unsupported GGML quantization type {ggml_type}. "
-            f"Supported: {sorted(_QUANT_SIZES)}"
+            f"Supported: [0, 1] + {sorted(_QUANT_SIZES)}"
         )
 
     if isinstance(data, (bytes, bytearray)):
