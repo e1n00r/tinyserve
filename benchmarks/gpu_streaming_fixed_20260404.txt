@@ -1,0 +1,9 @@
+=== GPU KV + StreamingLLM window=250 max_kv=320 ===
+Slots: 237
+
+ctx=   10:  20.0 tok/s  KV=30  HR=93%
+ctx=  100:  21.1 tok/s  KV=120  HR=96%
+ctx=  500:  18.2 tok/s  KV=260  HR=88%
+ctx= 1000:  20.2 tok/s  KV=314  HR=86%
+ctx= 4000:  19.9 tok/s  KV=306  HR=80%
+ctx= 8000: ERR cannot reshape tensor of 0 elements into shape [1, 0, -1, 64] because the unspec
