@@ -87,18 +87,41 @@ class ExpertPipeline:
         self._buddy_tables: dict | None = None  # Per-layer tables from calibration
         self.cache_bias: float = 0.0  # logit bias magnitude for cache-aware routing (I4)
         self.profiler: OffloadProfiler | None = None
-        # Precomputed param refs for zero-copy forward from cache slots.
-        bf16_layout = store._bf16_layout if store._fp8 else store.layout
-        self._param_refs = _precompute_param_refs(template, bf16_layout)
-        self._act_fn = getattr(template, "_act_fn", None)
-        # Inlined forward: baked-in offsets, no dict/getattr per call.
-        # For MXFP4 layouts, use MXFP4 inline forward (direct dot_scaled_vecmat,
-        # no param.data rebinding). GPU INT4 disabled on 8GB GPUs.
-        self._inline_fwd = _build_inline_forward(bf16_layout, self._act_fn)
-        if self._inline_fwd is None:
-            self._inline_fwd = _build_mxfp4_inline_forward(bf16_layout, self._act_fn)
-        if self._inline_fwd is None:
-            self._inline_fwd = _build_gpu_int4_forward(bf16_layout, self._act_fn)
+        self._expert_output_buf: torch.Tensor | None = None
+
+        # Native quant detection: MmapExpertStore / FusedMmapExpertStore have ggml_types
+        self._native_quant = hasattr(store, "ggml_types")
+        if self._native_quant:
+            from .ggml_forward import GGMLExpertForward
+
+            self._act_fn = nn.SiLU()
+            self._nq_forward = GGMLExpertForward(
+                store.layout,
+                store.ggml_types,
+                self._act_fn,
+                getattr(store, "proj_shapes", {}),
+            )
+            self._param_refs = None
+            self._inline_fwd = None
+            self._cpp_layout_args = None
+            self._cpp_ext = None
+        else:
+            # Precomputed param refs for zero-copy forward from cache slots.
+            bf16_layout = store._bf16_layout if store._fp8 else store.layout
+            self._param_refs = _precompute_param_refs(template, bf16_layout)
+            self._act_fn = getattr(template, "_act_fn", None)
+            # Inlined forward: baked-in offsets, no dict/getattr per call.
+            # For MXFP4 layouts, use MXFP4 inline forward (direct dot_scaled_vecmat,
+            # no param.data rebinding). GPU INT4 disabled on 8GB GPUs.
+            self._inline_fwd = _build_inline_forward(bf16_layout, self._act_fn)
+            if self._inline_fwd is None:
+                self._inline_fwd = _build_mxfp4_inline_forward(bf16_layout, self._act_fn)
+            if self._inline_fwd is None:
+                self._inline_fwd = _build_gpu_int4_forward(bf16_layout, self._act_fn)
+            # C++ expert loop: precomputed layout args + module handle.
+            self._cpp_layout_args = _build_cpp_layout_args(bf16_layout, self._act_fn)
+            self._cpp_ext = _get_expert_loop() if self._cpp_layout_args is not None else None
+
         self.shared_stream = shared_stream if shared_stream is not None else torch.cuda.Stream(device)
         self._prefetch_stream = torch.cuda.Stream(device)
         self._prefetch_events: dict[int, torch.cuda.Event] = {}  # slot -> H2D-complete event
@@ -106,10 +129,6 @@ class ExpertPipeline:
         # not one per layer) since only one prefetch runs at a time during decode.
         # Set by OffloadedModel.from_module after construction.
         self._prefetch_fp8_stage: torch.Tensor | None = None
-        self._expert_output_buf: torch.Tensor | None = None
-        # C++ expert loop: precomputed layout args + module handle.
-        self._cpp_layout_args = _build_cpp_layout_args(bf16_layout, self._act_fn)
-        self._cpp_ext = _get_expert_loop() if self._cpp_layout_args is not None else None
         # Pre-allocated decode hot-path buffers: avoids torch.tensor() per token.
         # max_top_k covers top_k and fate_top_k (top_k+1). Sized once; sliced per call.
         self._slots_buf = torch.empty(max_top_k, dtype=torch.int32, device=device)
@@ -122,6 +141,10 @@ class ExpertPipeline:
         expert_indices: torch.Tensor,
         routing_weights: torch.Tensor,
     ) -> torch.Tensor:
+        if self._native_quant:
+            return self._execute_layer_experts_native(
+                hidden_states, layer_idx, expert_indices, routing_weights,
+            )
         if self._expert_output_buf is None or self._expert_output_buf.shape != hidden_states.shape:
             self._expert_output_buf = torch.zeros_like(hidden_states)
         else:
@@ -150,6 +173,10 @@ class ExpertPipeline:
         batched forward for all tokens routed to that expert, then scatters weighted
         results back. Reduces expert loads from O(seq_len * top_k) to O(num_unique_experts).
         """
+        if self._native_quant:
+            return self._execute_layer_experts_batched_native(
+                hidden_states, layer_idx, expert_indices, routing_weights,
+            )
         seq_len = hidden_states.shape[0]
         if seq_len == 0:
             return hidden_states.clone()
@@ -197,6 +224,104 @@ class ExpertPipeline:
                 else:
                     out_batch = swap_weights_and_forward(self.template, buf, h_batch)
 
+                if cache is not None:
+                    slot = cache.allocate(layer_idx, eid)
+                    cache.get_packed(slot).copy_(buf.packed)
+
+            for i, (tok_idx, k) in enumerate(zip(tok_indices, weight_indices)):
+                output[tok_idx] += routing_weights[tok_idx, k] * out_batch[i]
+
+        if cache is not None and hasattr(cache, "flush_slot_updates"):
+            cache.flush_slot_updates()
+        return output
+
+    def _execute_layer_experts_native(
+        self,
+        hidden_states: torch.Tensor,
+        layer_idx: int,
+        expert_indices: torch.Tensor,
+        routing_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        if self._expert_output_buf is None or self._expert_output_buf.shape != hidden_states.shape:
+            self._expert_output_buf = torch.zeros_like(hidden_states)
+        else:
+            self._expert_output_buf.zero_()
+
+        output = self._expert_output_buf
+        cache = self.cache
+
+        for tok in range(hidden_states.shape[0]):
+            h = hidden_states[tok : tok + 1]
+            eids = expert_indices[tok]
+            weights = routing_weights[tok]
+
+            if isinstance(eids, torch.Tensor):
+                eids_list = eids.tolist()
+            else:
+                eids_list = list(eids)
+
+            for k, eid in enumerate(eids_list):
+                slot = cache.lookup(layer_idx, eid) if cache else None
+
+                if slot is not None:
+                    packed = cache.get_packed(slot)
+                    out = self._nq_forward.forward(packed, h)
+                else:
+                    buf = self.staging_buffer_a
+                    self.store.copy_to_buffer(buf, layer_idx, eid, non_blocking=False)
+                    torch.cuda.synchronize()
+                    out = self._nq_forward.forward(buf.packed, h)
+                    if cache is not None:
+                        slot = cache.allocate(layer_idx, eid)
+                        cache.get_packed(slot).copy_(buf.packed)
+
+                output[tok] += weights[k] * out.squeeze(0)
+
+        if cache is not None and hasattr(cache, "flush_slot_updates"):
+            cache.flush_slot_updates()
+        return output.clone()
+
+    def _execute_layer_experts_batched_native(
+        self,
+        hidden_states: torch.Tensor,
+        layer_idx: int,
+        expert_indices: torch.Tensor,
+        routing_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        seq_len = hidden_states.shape[0]
+        if seq_len == 0:
+            return hidden_states.clone()
+
+        output = torch.zeros_like(hidden_states)
+        top_k = expert_indices.shape[1]
+        cache = self.cache
+
+        eid_list = expert_indices.tolist()
+        expert_groups: dict[int, list[tuple[int, int]]] = {}
+        for tok in range(seq_len):
+            for k in range(top_k):
+                eid = eid_list[tok][k]
+                if eid not in expert_groups:
+                    expert_groups[eid] = []
+                expert_groups[eid].append((tok, k))
+
+        for eid, group in expert_groups.items():
+            tok_indices = [g[0] for g in group]
+            weight_indices = [g[1] for g in group]
+            h_batch = hidden_states[tok_indices]
+
+            out_batch = None
+            if cache is not None:
+                slot = cache.lookup(layer_idx, eid)
+                if slot is not None:
+                    packed = cache.get_packed(slot)
+                    out_batch = self._nq_forward.forward(packed, h_batch)
+
+            if out_batch is None:
+                buf = self.staging_buffer_a
+                self.store.copy_to_buffer(buf, layer_idx, eid, non_blocking=False)
+                torch.cuda.synchronize()
+                out_batch = self._nq_forward.forward(buf.packed, h_batch)
                 if cache is not None:
                     slot = cache.allocate(layer_idx, eid)
                     cache.get_packed(slot).copy_(buf.packed)
