@@ -1,0 +1,4 @@
+=== Post tensor-prealloc + tolist-consolidation ===
+Decode-only: 40 tok in 1964ms = 49.1ms/tok = 20.4 tok/s
+Before: 50.6 ms/tok = 19.8 tok/s
+Delta: 1.5 ms/tok = 0.6 tok/s improvement

@@ -1,0 +1,5 @@
+=== Decode Loop Comparison ===
+
+model.generate (HF):    40 tok in 3041ms = 76.0ms/tok = 13.2 tok/s
+fast_generate:          40 tok in 3019ms = 75.5ms/tok = 13.2 tok/s
+raw decode loop (warm): 40 tok in 2022ms = 50.6ms/tok = 19.8 tok/s
