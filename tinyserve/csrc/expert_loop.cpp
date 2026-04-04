@@ -32,7 +32,7 @@ torch::Tensor swiglu_forward(
   using namespace torch::indexing;
   auto gate = gate_up.index({"...", Slice(None, None, 2)}).clamp_max(7.0);
   auto up = gate_up.index({"...", Slice(1, None, 2)}).clamp(-7.0, 7.0);
-  auto gated = (up + 1) * gate * torch::sigmoid(gate * 1.702);
+  auto gated = (up + 1) * gate * torch::sigmoid(gate * 1.702);  // Quick GELU coefficient (matches _QUICK_GELU_COEFF in expert_forward.py)
   return torch::linear(gated, w_dn, b_dn.has_value() ? *b_dn : torch::Tensor());
 }
 

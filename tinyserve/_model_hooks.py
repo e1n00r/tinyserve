@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .expert_forward import _QUICK_GELU_COEFF
 from .expert_pipeline import ExpertPipeline
 from .expert_store import ExpertStore, _is_qtensor
 from .mxfp4 import dequant_mxfp4_no_transpose
@@ -362,7 +363,7 @@ class _FusedExpertTemplate(nn.Module):
             )
             gate = gate_up[..., ::2].clamp(max=7.0)
             up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
-            gated = (up + 1) * gate * torch.sigmoid(gate * 1.702)
+            gated = (up + 1) * gate * torch.sigmoid(gate * _QUICK_GELU_COEFF)
             return _mxfp4_linear(
                 gated,
                 params["down_proj"],
@@ -381,7 +382,7 @@ class _FusedExpertTemplate(nn.Module):
         else:
             gate = gate_up[..., ::2].clamp(max=7.0)
             up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
-            gated = (up + 1) * gate * torch.sigmoid(gate * 1.702)
+            gated = (up + 1) * gate * torch.sigmoid(gate * _QUICK_GELU_COEFF)
 
         w_dn = params["down_proj"]
         if w_dn.shape[0] == gated.shape[-1]:

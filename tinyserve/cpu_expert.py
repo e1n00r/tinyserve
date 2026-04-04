@@ -15,6 +15,7 @@ _weight_int4pack_mm_for_cpu for fast CPU inference.
 import torch
 import torch.nn.functional as F
 
+from .expert_forward import _QUICK_GELU_COEFF
 from .expert_store import TensorLayout
 
 HAS_INT4_CPU = hasattr(torch.ops.aten, "_weight_int4pack_mm_for_cpu") and hasattr(
@@ -173,7 +174,7 @@ class CPUINT4Forward:
             else:
                 gate = gate_up[..., ::2].clamp(max=7.0)
                 up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
-                gated = (up + 1) * gate * torch.sigmoid(gate * 1.702)
+                gated = (up + 1) * gate * torch.sigmoid(gate * _QUICK_GELU_COEFF)
 
             out = torch.ops.aten._weight_int4pack_mm_for_cpu(
                 gated, dn_packed, self.group_size, dn_sz
@@ -298,7 +299,7 @@ class CPUExpertForward:
         else:
             gate = gate_up[..., ::2].clamp(max=7.0)
             up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
-            gated = (up + 1) * gate * torch.sigmoid(gate * 1.702)
+            gated = (up + 1) * gate * torch.sigmoid(gate * _QUICK_GELU_COEFF)
 
         w_dn = packed[self._dn_off : self._dn_off + self._dn_sz].view(self._dn_dtype).view(self._dn_shape)
         if self._dn_needs_t:

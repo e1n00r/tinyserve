@@ -12,6 +12,7 @@ Graceful fallback: HAS_INT4_GPU is False if ops or CUDA unavailable.
 
 import torch
 
+from .expert_forward import _QUICK_GELU_COEFF
 from .expert_store import TensorLayout
 
 HAS_INT4_GPU = (
@@ -154,7 +155,7 @@ class GPUINT4Forward:
         else:
             gate = gate_up[..., ::2].clamp(max=7.0)
             up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
-            gated = (up + 1) * gate * torch.sigmoid(gate * 1.702)
+            gated = (up + 1) * gate * torch.sigmoid(gate * _QUICK_GELU_COEFF)
 
         out = torch._weight_int4pack_mm(gated, dn_packed, self.group_size, dn_sz)
         return out

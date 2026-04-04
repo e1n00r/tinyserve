@@ -26,6 +26,9 @@ except ImportError:
         return None
 
 
+# Quick GELU approximation coefficient: sigmoid(1.702 * x) ≈ GELU(x).
+_QUICK_GELU_COEFF = 1.702
+
 _template_weight_storage: dict[int, dict[str, torch.Tensor]] = {}
 
 
@@ -181,7 +184,7 @@ def _build_inline_forward(layout, act_fn):
             gate_up = linear(h, w_gu, b_gu)
             gate = gate_up[..., ::2].clamp(max=7.0)
             up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
-            gated = (up + 1) * gate * torch.sigmoid(gate * 1.702)
+            gated = (up + 1) * gate * torch.sigmoid(gate * _QUICK_GELU_COEFF)
             w_dn = packed[dn_off : dn_off + dn_sz].view(dn_dtype).view(dn_shape)
             if dn_needs_t:
                 w_dn = w_dn.t()
@@ -234,7 +237,7 @@ def _build_mxfp4_inline_forward(layout, act_fn):
             gate_up = _mxfp4_linear(h, w_gu, s_gu)
             gate = gate_up[..., ::2].clamp(max=7.0)
             up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
-            gated = (up + 1) * gate * torch.sigmoid(gate * 1.702)
+            gated = (up + 1) * gate * torch.sigmoid(gate * _QUICK_GELU_COEFF)
             w_dn = packed[dn_off:dn_off + dn_sz].view(torch.uint8).view(dn_shape)
             s_dn = packed[ds_off:ds_off + ds_sz].view(torch.uint8).view(ds_shape)
             return _mxfp4_linear(gated, w_dn, s_dn)

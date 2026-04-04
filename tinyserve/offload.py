@@ -35,6 +35,10 @@ class RoutingSpec(NamedTuple):
 
 logger = logging.getLogger(__name__)
 
+_RESERVED_VRAM_BYTES = 128 * 1024 * 1024  # 128 MB for CUDA kernels + defragmentation
+_HEAD_ATTENTION_SEQ_THRESHOLD = 2048
+_HEAD_PREFILL_KV_THRESHOLD = 1024
+
 
 @dataclass
 class TinyserveConfig:
@@ -233,7 +237,7 @@ def _register_sdpa_attention() -> str:
                     query, k_decode, v_decode, attn_mask=None, dropout_p=0.0,
                     is_causal=False, scale=scaling, enable_gqa=True,
                 )
-            elif S > 2048 or (L > 256 and S > 1024):
+            elif S > _HEAD_ATTENTION_SEQ_THRESHOLD or (L > 256 and S > _HEAD_PREFILL_KV_THRESHOLD):
                 # Long KV context: head-wise attention to avoid VRAM OOM.
                 # Triggers when KV length exceeds 2048, or when both chunk and
                 # KV are moderate. Processes one GQA group at a time — peak VRAM
@@ -480,7 +484,7 @@ def offload_model(
     # Cap usable VRAM like vLLM's --gpu-memory-utilization
     usable_vram = int(total_vram * gpu_memory_utilization) - used_vram
     free_vram = max(0, usable_vram)
-    reserved = 2 * buf_bytes + 128 * 1024 * 1024  # double-buf + 128 MB headroom
+    reserved = 2 * buf_bytes + _RESERVED_VRAM_BYTES  # double-buf + 128 MB headroom
 
     kv_cache = None
     kv_vram = 0
