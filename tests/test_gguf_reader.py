@@ -430,11 +430,11 @@ class TestGGUFQuantizedTensors:
     def test_q4_k_tensor_info(self, tmp_path):
         """Parse a file with Q4_K tensors and verify nbytes calculation."""
         path = tmp_path / "q4k.gguf"
-        _create_synthetic_gguf(path, n_layers=1, n_experts=1, ggml_type=14)
+        _create_synthetic_gguf(path, n_layers=1, n_experts=1, ggml_type=12)
 
         reader = GGUFReader(path)
         t = reader.tensors[0]
-        assert t.ggml_type == 14
+        assert t.ggml_type == 12
         assert t.ggml_type_name == "Q4_K"
         assert t.block_size == 256
 
@@ -446,7 +446,7 @@ class TestGGUFQuantizedTensors:
     def test_q4_k_data_readback(self, tmp_path):
         """Q4_K tensor data can be read back correctly."""
         path = tmp_path / "q4k.gguf"
-        _create_synthetic_gguf(path, n_layers=1, n_experts=1, ggml_type=14)
+        _create_synthetic_gguf(path, n_layers=1, n_experts=1, ggml_type=12)
 
         reader = GGUFReader(path)
         t = reader.tensors[0]

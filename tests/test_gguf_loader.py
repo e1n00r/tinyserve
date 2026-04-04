@@ -371,13 +371,13 @@ class TestDequantTensor:
 
     def test_unsupported_type_raises(self, tmp_path):
         shape = (4, 8)
-        # Q2_K (type 12) — not supported for non-expert
+        # Q3_K (type 11) — not supported for non-expert
         data = b"\x00" * (256 * ((4 * 8 + 255) // 256))
-        path = tmp_path / "q2k.gguf"
+        path = tmp_path / "q3k.gguf"
         _create_gguf_with_metadata(
             path,
             {"general.architecture": "test"},
-            [{"name": "test.weight", "shape": shape, "ggml_type": 12, "data": data}],
+            [{"name": "test.weight", "shape": shape, "ggml_type": 11, "data": data}],
         )
         reader = GGUFReader(path)
         info = reader.tensors[0]
@@ -724,8 +724,8 @@ class TestDequantFusedTensor:
 
     def test_unsupported_type_raises(self, tmp_path):
         shape = (4, 8, 2)
-        data = b"\x00" * (4 * 8 * 2 * 4)
-        path = self._make_fused_gguf(tmp_path, shape, 12, data)
+        data = b"\x00" * (256 * ((4 * 8 * 2 + 255) // 256))
+        path = self._make_fused_gguf(tmp_path, shape, 11, data)
         reader = GGUFReader(path)
         info = reader.tensors[0]
         with pytest.raises(ValueError, match="Unsupported GGML type"):

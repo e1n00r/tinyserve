@@ -142,7 +142,7 @@ def _create_q4k_gguf(path, n_layers=1, n_experts=2, hidden=IN_FEATURES, intermed
     gate/up: shape (intermediate, hidden) -- Q4_K quantized
     down: shape (hidden, intermediate) -- Q4_K quantized
     """
-    ggml_type = 14  # Q4_K
+    ggml_type = 12  # Q4_K
     _, bytes_per_block, block_size = GGML_TYPES[ggml_type]
 
     projections = ["gate", "up", "down"]
@@ -187,7 +187,7 @@ def _create_q4k_gguf(path, n_layers=1, n_experts=2, hidden=IN_FEATURES, intermed
     n_kv = 2
 
     with open(path, "wb") as f:
-        f.write(struct.pack("<I", 0x46475547))
+        f.write(struct.pack("<I", 0x46554747))
         f.write(struct.pack("<I", 3))
         f.write(struct.pack("<Q", n_tensors))
         f.write(struct.pack("<Q", n_kv))
