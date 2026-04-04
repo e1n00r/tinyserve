@@ -22,8 +22,7 @@ from .gguf_dequant import (
 )
 from .gguf_reader import GGUFReader, GGUFTensorInfo
 from .gguf_weights import (
-    _build_expert_store_from_fused_reader,
-    _build_expert_store_from_reader,
+    _build_expert_store_from_fused_reader,  # noqa: F401 (re-exported for tests)
     _find_tensor_info,
     _get_param,
     _set_param,
@@ -387,7 +386,9 @@ def load_from_gguf(
     2. Create HF model skeleton with ``init_empty_weights``
     3. Map GGUF tensor names to HF parameter names
     4. Non-expert weights: dequant to BF16, load onto GPU
-    5. Expert weights: create GGUFExpertStore (Q4_K -> INT4 pack)
+    5. Expert weights: create MmapExpertStore (per-expert) or FusedMmapExpertStore
+       via ``from_fused_gguf`` (Qwen-style fused). Old BF16 dequant paths in
+       ``gguf_weights.py`` are kept as ``--force-bf16-dequant`` fallback.
     6. Apply expert offloading via ``offload_model``
 
     Args:
@@ -470,7 +471,7 @@ def load_from_gguf(
 
     for name in all_names:
         if name in fused_expert_names:
-            continue  # handled separately via _build_expert_store_from_fused_reader
+            continue  # handled separately via from_fused_gguf
         _, is_expert, _, _ = gguf_to_hf_name(name)
         if is_expert:
             expert_names.append(name)
@@ -523,46 +524,35 @@ def load_from_gguf(
 
     logger.info("Loaded %d non-expert weights, skipped %d", loaded, skipped)
 
-    # Step 5: Expert weights -> expert store
+    # Step 5: Expert weights -> MmapExpertStore (zero-copy, native quant)
+    from .mmap_store import MmapExpertStore, from_fused_gguf
 
-    expert_groups = reader.list_expert_tensors()
-
-    if expert_groups:
-        store = _build_expert_store_from_reader(reader, expert_groups, is_multi)
+    if fused_expert_names:
+        # Fused format (Qwen-style): blk.<L>.ffn_{gate,up,down}_exps.weight
+        # Convert to per-expert .experts file on first call, then mmap it.
+        reader.close()
+        expert_store = from_fused_gguf(gguf_path)
         logger.info(
-            "Expert store (per-expert): %d layers, %d experts, %.2f MB/expert",
-            store.num_layers,
-            store.num_experts,
-            store.expert_bytes / 1e6,
+            "Expert store (fused mmap): %d layers, %d experts, %.2f MB/expert",
+            expert_store.num_layers,
+            expert_store.num_experts,
+            expert_store.expert_bytes / 1e6,
+        )
+    elif expert_names:
+        # Per-expert format: blk.<L>.ffn_{gate,up,down}.<E>.weight
+        reader.close()
+        expert_store = MmapExpertStore(gguf_path)
+        logger.info(
+            "Expert store (per-expert mmap): %d layers, %d experts, %.2f MB/expert",
+            expert_store.num_layers,
+            expert_store.num_experts,
+            expert_store.expert_bytes / 1e6,
         )
     else:
-        store = None
+        reader.close()
+        raise ValueError(f"No expert tensors found in {gguf_path}")
 
-    if store is None and fused_expert_names:
-        logger.info(
-            "No per-expert tensors found; attempting fused expert tensor slicing (%d fused tensors)",
-            len(fused_expert_names),
-        )
-        store = _build_expert_store_from_fused_reader(
-            reader,
-            num_layers=gguf_cfg.num_hidden_layers,
-            num_experts=gguf_cfg.num_experts,
-            device=device,
-        )
-        if store is not None:
-            logger.info(
-                "Expert store (fused): %d layers, %d experts, %.2f MB/expert",
-                store.num_layers,
-                store.num_experts,
-                store.expert_bytes / 1e6,
-            )
-
-    if store is None:
-        logger.warning("No expert tensors found in GGUF — model has no MoE layers?")
-
-    reader.close()
-
-    # Step 6: Apply offloading
+    # Step 6: Apply offloading with the pre-built mmap store
     from .offload import offload_model
 
     model = offload_model(
@@ -570,6 +560,7 @@ def load_from_gguf(
         device=device,
         cache_capacity=cache_capacity,
         model_id=model_id,
+        expert_store=expert_store,
         **kwargs,
     )
 
