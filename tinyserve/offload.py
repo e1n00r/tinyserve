@@ -507,7 +507,29 @@ def offload_model(
 
     if hasattr(model, "model"):
         model.model = offloaded.model
-    model = model.to(device).to(torch.bfloat16)
+
+    # Move model to device. For GGUF models with native-quant weights (GGMLLinear),
+    # weights are already on GPU — use to_empty() to handle remaining meta tensors
+    # (expert params that are managed by MmapExpertStore, not the model).
+    if expert_store is not None:
+        # GGUF path: GGMLLinear weights already on GPU, non-linear already dequanted.
+        # Only need to handle leftover meta tensors (expert params managed by store).
+        for module in model.modules():
+            for name, param in module.named_parameters(recurse=False):
+                if param.device.type == "meta":
+                    # Replace meta param with empty tensor (expert weights live in store)
+                    new_param = torch.nn.Parameter(
+                        torch.empty(0, device=device, dtype=torch.bfloat16),
+                        requires_grad=False,
+                    )
+                    setattr(module, name, new_param)
+                elif not isinstance(param.data, torch.Tensor) or param.device != torch.device(device):
+                    try:
+                        param.data = param.data.to(device=device, dtype=torch.bfloat16)
+                    except (RuntimeError, NotImplementedError):
+                        pass  # GGMLLinear._qweight is uint8, skip dtype cast
+    else:
+        model = model.to(device).to(torch.bfloat16)
 
     # Allocate KV cache first (if requested), then give remainder to expert cache.
     from .expert_cache import ExpertCache
