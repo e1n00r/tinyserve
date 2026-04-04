@@ -11,10 +11,13 @@ data stays in the mmap'd file (OS page cache), never in pinned RAM.
 from __future__ import annotations
 
 import json
+import logging
 import mmap
 import os
 import struct
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 import torch
 
@@ -371,11 +374,24 @@ def _convert_fused_to_per_expert(gguf_path: Path, experts_path: Path) -> None:
         f.write(struct.pack("<I", len(header_bytes)))
         f.write(header_bytes)
 
-        for layer_idx in layers:
+        for li, layer_idx in enumerate(layers):
             info = fused[layer_idx]
-            gate_f32 = _dequant_fused_tensor(reader, info["gate"], info["gate"].name, "cpu").float()
-            up_f32 = _dequant_fused_tensor(reader, info["up"], info["up"].name, "cpu").float()
-            down_f32 = _dequant_fused_tensor(reader, info["down"], info["down"].name, "cpu").float()
+            logger.info("Converting layer %d/%d...", li + 1, len(layers))
+
+            # Use vectorized city96 dequant (100x faster than loop-based _dequant_fused_tensor)
+            from .gguf_dequant_torch import dequant_tensor
+
+            def _dequant_fused(tensor_info):
+                raw = reader.get_tensor_data(tensor_info.name if hasattr(tensor_info, 'name') else tensor_info)
+                shape_3d = tuple(tensor_info.shape)
+                n_elements = 1
+                for d in shape_3d:
+                    n_elements *= d
+                return dequant_tensor(raw, tensor_info.ggml_type, (n_elements,)).reshape(shape_3d).float()
+
+            gate_f32 = _dequant_fused(info["gate"])
+            up_f32 = _dequant_fused(info["up"])
+            down_f32 = _dequant_fused(info["down"])
 
             for expert_idx in range(n_experts):
                 gate_e = gate_f32[:, :, expert_idx]
