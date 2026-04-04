@@ -155,7 +155,7 @@ def quantize_to_q8_0(tensor: torch.Tensor) -> bytes:
 
     Q8_0 format: 34 bytes per 32 elements.
     Layout per block: float16 scale (2 bytes) + int8[32] quants (32 bytes).
-    Scale is amax/127 so max absolute value maps to ±127.
+    Scale is amax/127 so max absolute value maps to +/-127.
 
     Args:
         tensor: Any shape float tensor. Trailing elements (< 32) are dropped.
@@ -176,6 +176,35 @@ def quantize_to_q8_0(tensor: torch.Tensor) -> bytes:
     for i in range(n_blocks):
         result[i * 34 : i * 34 + 2] = scales_bytes[i * 2 : i * 2 + 2]
         result[i * 34 + 2 : i * 34 + 34] = quants_bytes[i * 32 : i * 32 + 32]
+    return bytes(result)
+
+
+def quantize_to_q4_0(tensor: torch.Tensor) -> bytes:
+    """Quantize a float tensor to Q4_0 format.
+
+    Q4_0 format: 18 bytes per 32 elements.
+    Layout per block: float16 scale (2 bytes) + nibble-packed uint8[16] (16 bytes).
+    Symmetric quantization: scale = amax/8, q = round(x/scale) + 8, clamp [0,15].
+
+    ~1.9x smaller than Q8_0.
+    """
+    flat = tensor.flatten().float()
+    n_blocks = flat.shape[0] // 32
+    blocks = flat[: n_blocks * 32].reshape(n_blocks, 32)
+    amax = blocks.abs().amax(dim=1)
+    scales = (amax / 8.0).clamp(min=1e-10)
+    quants = torch.round(blocks / scales.unsqueeze(1) + 8).clamp(0, 15).to(torch.uint8)
+    scales_f16 = scales.to(torch.float16)
+    # Pack pairs of 4-bit values into bytes: low nibble = even index, high nibble = odd
+    even = quants[:, 0::2]  # [n_blocks, 16]
+    odd = quants[:, 1::2]   # [n_blocks, 16]
+    packed = (even | (odd << 4)).to(torch.uint8)  # [n_blocks, 16]
+    scales_bytes = scales_f16.numpy().tobytes()
+    packed_bytes = packed.numpy().tobytes()
+    result = bytearray(n_blocks * 18)
+    for i in range(n_blocks):
+        result[i * 18 : i * 18 + 2] = scales_bytes[i * 2 : i * 2 + 2]
+        result[i * 18 + 2 : i * 18 + 18] = packed_bytes[i * 16 : i * 16 + 16]
     return bytes(result)
 
 
@@ -218,7 +247,8 @@ class FusedMmapExpertStore:
         up_bytes: int = header["up_bytes"]
         down_bytes: int = header["down_bytes"]
 
-        self.ggml_types: dict[str, int] = {"gate": 8, "up": 8, "down": 8}
+        ggml_type = header.get("ggml_type", 2)
+        self.ggml_types: dict[str, int] = {"gate": ggml_type, "up": ggml_type, "down": ggml_type}
         self.proj_shapes: dict[str, tuple[int, int]] = {
             "gate": tuple(header["gate_shape"]),
             "up": tuple(header["up_shape"]),
@@ -287,10 +317,13 @@ class FusedMmapExpertStore:
 
 
 def _convert_fused_to_per_expert(gguf_path: Path, experts_path: Path) -> None:
-    """Convert fused GGUF expert tensors to per-expert Q8_0 .experts file.
+    """Convert fused GGUF expert tensors to per-expert Q4_0 .experts file.
+
+    Q4_0 (18 bytes/32 elements) is ~1.9x smaller than Q8_0 and keeps the
+    .experts file at ~65 GB for Qwen 122B (vs 123 GB for Q8_0).
 
     Writes to a .tmp file first, then atomically renames to experts_path.
-    Processes one layer at a time to bound peak RAM usage.
+    Processes one layer at a time to bound peak RAM usage (~3 GB peak).
     """
     tmp_path = Path(str(experts_path) + ".tmp")
     reader = open_gguf(gguf_path)
@@ -311,19 +344,19 @@ def _convert_fused_to_per_expert(gguf_path: Path, experts_path: Path) -> None:
     up_shape = (up_info.shape[0], up_info.shape[1])
     down_shape = (down_info.shape[0], down_info.shape[1])
 
-    # Compute Q8_0 byte sizes for each projection
+    # Compute Q4_0 byte sizes (18 bytes per 32 elements — compact, fast to quantize)
     gate_elements = gate_shape[0] * gate_shape[1]
     up_elements = up_shape[0] * up_shape[1]
     down_elements = down_shape[0] * down_shape[1]
-    gate_bytes = (gate_elements // 32) * 34
-    up_bytes = (up_elements // 32) * 34
-    down_bytes = (down_elements // 32) * 34
+    gate_bytes = (gate_elements // 32) * 18
+    up_bytes = (up_elements // 32) * 18
+    down_bytes = (down_elements // 32) * 18
     expert_bytes = gate_bytes + up_bytes + down_bytes
 
     header = {
         "num_layers": len(layers),
         "num_experts": n_experts,
-        "ggml_type": 8,
+        "ggml_type": 2,  # Q4_0
         "gate_shape": list(gate_shape),
         "up_shape": list(up_shape),
         "down_shape": list(down_shape),
@@ -348,9 +381,9 @@ def _convert_fused_to_per_expert(gguf_path: Path, experts_path: Path) -> None:
                 gate_e = gate_f32[:, :, expert_idx]
                 up_e = up_f32[:, :, expert_idx]
                 down_e = down_f32[:, :, expert_idx]
-                f.write(quantize_to_q8_0(gate_e))
-                f.write(quantize_to_q8_0(up_e))
-                f.write(quantize_to_q8_0(down_e))
+                f.write(quantize_to_q4_0(gate_e))
+                f.write(quantize_to_q4_0(up_e))
+                f.write(quantize_to_q4_0(down_e))
 
             del gate_f32, up_f32, down_f32
 

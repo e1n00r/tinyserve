@@ -16,6 +16,7 @@
 // --------------------------------------------------------------------------
 // GGML type IDs (subset we support)
 // --------------------------------------------------------------------------
+constexpr int GGML_TYPE_Q4_0 = 2;
 constexpr int GGML_TYPE_Q8_0 = 8;
 constexpr int GGML_TYPE_Q4_K = 12;
 constexpr int GGML_TYPE_Q5_K = 13;
@@ -29,7 +30,15 @@ constexpr int GGML_TYPE_Q6_K = 14;
 #define K_SCALE_SIZE 12
 #define QK8_0 32
 
+#define QK4_0 32
+
 #pragma pack(push, 1)
+
+struct block_q4_0 {
+    half d;
+    uint8_t qs[QK4_0 / 2];  // nibble-packed: 2 values per byte
+};
+static_assert(sizeof(block_q4_0) == sizeof(half) + QK4_0 / 2, "wrong q4_0 block size");
 
 struct block_q8_0 {
     half d;
@@ -77,6 +86,7 @@ struct QuantMeta {
 
 __host__ static QuantMeta get_quant_meta(int ggml_type) {
     switch (ggml_type) {
+        case GGML_TYPE_Q4_0: return {32, 18};
         case GGML_TYPE_Q8_0: return {32, 34};
         case GGML_TYPE_Q4_K: return {256, 144};
         case GGML_TYPE_Q5_K: return {256, 176};
@@ -151,6 +161,46 @@ __device__ __forceinline__ void get_scale_min_k4(
 // --------------------------------------------------------------------------
 
 // Q8_0: 32 elements per block, 34 bytes (2 byte scale + 32 int8 quants)
+// Q4_0: 32 elements per block, 18 bytes (simplest 4-bit format)
+__global__ void matvec_q4_0_kernel(
+    const void* __restrict__ weight,
+    const float* __restrict__ act,
+    float* __restrict__ out,
+    int N, int K
+) {
+    const int row = blockIdx.x * blockDim.y + threadIdx.y;
+    if (row >= N) return;
+
+    const int n_blocks = K / QK4_0;
+    const block_q4_0* w = (const block_q4_0*)weight + row * n_blocks;
+
+    float sum = 0.0f;
+    for (int b = threadIdx.x; b < n_blocks; b += blockDim.x) {
+        float d = __half2float(w[b].d);
+        int base = b * QK4_0;
+        float local_sum = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < QK4_0 / 2; ++i) {
+            uint8_t byte = w[b].qs[i];
+            float q_lo = (float)(byte & 0x0F) - 8.0f;
+            float q_hi = (float)(byte >> 4) - 8.0f;
+            local_sum += d * q_lo * act[base + 2 * i];
+            local_sum += d * q_hi * act[base + 2 * i + 1];
+        }
+        sum += local_sum;
+    }
+
+    // Warp reduction
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
+    }
+
+    if (threadIdx.x == 0) {
+        out[row] = sum;
+    }
+}
+
 __global__ void matvec_q8_0_kernel(
     const void* __restrict__ weight,
     const float* __restrict__ act,
@@ -448,6 +498,18 @@ torch::Tensor ggml_mul_mat_vec(
     const int warp_size = 32;
 
     switch (ggml_type) {
+        case GGML_TYPE_Q4_0: {
+            constexpr int rows_per_block = 4;
+            dim3 grid((N + rows_per_block - 1) / rows_per_block);
+            dim3 block(warp_size, rows_per_block);
+            matvec_q4_0_kernel<<<grid, block, 0, stream>>>(
+                weight_data.data_ptr<uint8_t>(),
+                act_f32.data_ptr<float>(),
+                output.data_ptr<float>(),
+                N, K
+            );
+            break;
+        }
         case GGML_TYPE_Q8_0: {
             // One warp per row, multiple rows per block
             constexpr int rows_per_block = 4;
