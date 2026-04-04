@@ -318,13 +318,13 @@ class ExpertPipeline:
                 slot = cache.lookup(layer_idx, eid)
                 if slot is not None:
                     packed = cache.get_packed(slot)
-                    out_batch = self._nq_forward.forward(packed, h_batch)
+                    out_batch = self._nq_forward.forward(packed, h_batch, layer_idx=layer_idx)
 
             if out_batch is None:
                 buf = self.staging_buffer_a
                 self.store.copy_to_buffer(buf, layer_idx, eid, non_blocking=False)
                 torch.cuda.synchronize()
-                out_batch = self._nq_forward.forward(buf.packed, h_batch)
+                out_batch = self._nq_forward.forward(buf.packed, h_batch, layer_idx=layer_idx)
                 if cache is not None:
                     slot = cache.allocate(layer_idx, eid)
                     cache.get_packed(slot).copy_(buf.packed)
