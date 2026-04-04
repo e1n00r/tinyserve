@@ -86,30 +86,17 @@ class GGMLExpertForward:
 
         op = torch.ops.tinyserve_ggml_ops.ggml_mul_mat_vec
 
-        gate_out = op(
-            h,
-            gate_data,
-            self._ggml_types["gate"],
-            self._proj_shapes["gate"][0],
-            self._proj_shapes["gate"][1],
-        )
-        up_out = op(
-            h,
-            up_data,
-            self._ggml_types["up"],
-            self._proj_shapes["up"][0],
-            self._proj_shapes["up"][1],
-        )
+        # proj_shapes are GGML convention: (ne[0]=in_features, ne[1]=out_features)
+        # ggml kernel args: (activation, weight, type, out_features, in_features)
+        gate_out = op(h, gate_data, self._ggml_types["gate"],
+                      self._proj_shapes["gate"][1], self._proj_shapes["gate"][0])
+        up_out = op(h, up_data, self._ggml_types["up"],
+                    self._proj_shapes["up"][1], self._proj_shapes["up"][0])
 
         hidden = self._act_fn(gate_out) * up_out
 
-        return op(
-            hidden,
-            down_data,
-            self._ggml_types["down"],
-            self._proj_shapes["down"][0],
-            self._proj_shapes["down"][1],
-        )
+        return op(hidden, down_data, self._ggml_types["down"],
+                  self._proj_shapes["down"][1], self._proj_shapes["down"][0])
 
     def _fallback_forward(self, packed: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
         from .gguf_dequant_torch import dequant_tensor
@@ -122,9 +109,10 @@ class GGMLExpertForward:
         up_w = dequant_tensor(up_bytes.cpu(), self._ggml_types["up"], self._proj_shapes["up"])
         down_w = dequant_tensor(down_bytes.cpu(), self._ggml_types["down"], self._proj_shapes["down"])
 
-        gate_w = gate_w.to(device=h.device, dtype=h.dtype)
-        up_w = up_w.to(device=h.device, dtype=h.dtype)
-        down_w = down_w.to(device=h.device, dtype=h.dtype)
+        # GGML stores (in_features, out_features), F.linear expects (out_features, in_features)
+        gate_w = gate_w.T.contiguous().to(device=h.device, dtype=h.dtype)
+        up_w = up_w.T.contiguous().to(device=h.device, dtype=h.dtype)
+        down_w = down_w.T.contiguous().to(device=h.device, dtype=h.dtype)
 
         gate_out = F.linear(h, gate_w)
         up_out = F.linear(h, up_w)

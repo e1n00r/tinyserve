@@ -505,23 +505,39 @@ def load_from_gguf(
         len(non_expert_names),
     )
 
-    # Step 4: Load non-expert weights — native quant where possible
+    # Step 4: Load non-expert weights
     #
-    # Linear layers (attention Q/K/V/O, router gate): store raw Q4_K/Q5_K bytes
-    # on GPU, replace nn.Linear with GGMLLinear (ggml kernel for batch=1).
-    # Non-linear params (embeddings, norms): dequant to BF16 (small, must be float).
-    from .ggml_linear import GGMLLinear, replace_linear_with_ggml
+    # Use architecture-specific mapper if available (handles fused QKV, norm offsets,
+    # V-head reorders, etc.). Falls back to generic gguf_to_hf_name mapper.
+    #
+    # Linear layers: store raw Q4_K/Q5_K on GPU as GGMLLinear (ggml kernel).
+    # Non-linear (embeddings, norms, biases): dequant to BF16 (must be float).
+    from .ggml_linear import replace_linear_with_ggml
+
+    # Select mapper based on architecture
+    arch = reader.metadata.get("general.architecture", "")
+    if arch == "qwen35moe":
+        from .qwen35moe_mapper import map_gguf_to_hf as _map_name
+        logger.info("Using Qwen3.5MoE-specific GGUF mapper")
+    else:
+        def _map_name(gguf_name):
+            hf, is_expert, _, _ = gguf_to_hf_name(gguf_name)
+            return hf, False, is_expert
 
     linear_weights: dict[str, tuple[bytes, int, tuple[int, int]]] = {}
     loaded = 0
     skipped = 0
 
     for gguf_name in non_expert_names:
-        hf_name, _, _, _ = gguf_to_hf_name(gguf_name)
+        hf_name, needs_norm_offset, is_fused_expert = _map_name(gguf_name)
+
+        if is_fused_expert or hf_name is None:
+            skipped += 1
+            continue
 
         param = _get_param(model, hf_name)
         if param is None:
-            logger.debug("Skipping unmapped GGUF tensor: %s -> %s", gguf_name, hf_name)
+            logger.debug("Skipping unmapped: %s -> %s (no param)", gguf_name, hf_name)
             skipped += 1
             continue
 
@@ -532,31 +548,39 @@ def load_from_gguf(
             info = _find_tensor_info(reader, gguf_name)
             raw = reader.get_tensor_data(info)
 
-        # Linear layers with 2D weight: keep native quant
+        # Linear layers with 2D weight and quantized type: keep native quant
         is_linear_weight = (
             len(info.shape) == 2
-            and info.ggml_type in (2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 15)  # any quant type
+            and info.ggml_type in (2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 15)
             and hf_name.endswith(".weight")
-            and not hf_name.endswith("layernorm.weight")
-            and not hf_name.endswith("norm.weight")
+            and not needs_norm_offset  # norms must be float (need +1 offset)
             and "embed" not in hf_name
         )
 
         if is_linear_weight:
-            # Strip trailing ".weight" to get module path
             module_path = hf_name.rsplit(".weight", 1)[0]
-            linear_weights[module_path] = (raw, info.ggml_type, (info.shape[0], info.shape[1]))
+            # GGML stores ne[0]=in_features, ne[1]=out_features (column-major convention)
+            linear_weights[module_path] = (raw, info.ggml_type, (info.shape[1], info.shape[0]))
             loaded += 1
         else:
-            # Non-linear (embeddings, norms, biases): must be float, dequant
+            # Non-linear: dequant to BF16
             try:
                 from .gguf_dequant_torch import dequant_tensor as _fast_dequant
-                tensor = _fast_dequant(raw, info.ggml_type, tuple(info.shape)).to(torch.bfloat16).to(device)
+                tensor = _fast_dequant(raw, info.ggml_type, tuple(info.shape)).to(torch.bfloat16)
             except (ImportError, ValueError):
-                tensor = _dequant_tensor(reader, info, gguf_name, device)
+                tensor = _dequant_tensor(reader, info, gguf_name, device).cpu().to(torch.bfloat16)
+
+            # Apply norm +1 offset (GGUF stores w-1, HF expects w)
+            if needs_norm_offset:
+                tensor = tensor + 1.0
+
+            tensor = tensor.to(device)
 
             if tensor.shape != param.shape:
-                if tensor.numel() == param.numel():
+                # GGUF often stores 2D weights transposed relative to HF
+                if tensor.dim() == 2 and param.dim() == 2 and tensor.shape == param.shape[::-1]:
+                    tensor = tensor.T.contiguous()
+                elif tensor.numel() == param.numel():
                     tensor = tensor.reshape(param.shape)
                 else:
                     logger.warning("Shape mismatch for %s: GGUF %s vs model %s", hf_name, tensor.shape, param.shape)
@@ -566,9 +590,8 @@ def load_from_gguf(
             _set_param(model, hf_name, tensor)
             loaded += 1
 
-    # Replace nn.Linear modules with GGMLLinear (native quant on GPU)
     n_replaced = replace_linear_with_ggml(model, linear_weights, device)
-    logger.info("Loaded %d weights (%d native quant linear, %d dequant), skipped %d",
+    logger.info("Loaded %d weights (%d native quant, %d dequant), skipped %d",
                 loaded, n_replaced, loaded - n_replaced, skipped)
 
     # Step 5: Expert weights -> MmapExpertStore (zero-copy, native quant)

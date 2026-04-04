@@ -513,21 +513,23 @@ def offload_model(
     # (expert params that are managed by MmapExpertStore, not the model).
     if expert_store is not None:
         # GGUF path: GGMLLinear weights already on GPU, non-linear already dequanted.
-        # Only need to handle leftover meta tensors (expert params managed by store).
+        # Handle leftover meta tensors and move remaining params/buffers to device.
         for module in model.modules():
             for name, param in module.named_parameters(recurse=False):
                 if param.device.type == "meta":
-                    # Replace meta param with empty tensor (expert weights live in store)
-                    new_param = torch.nn.Parameter(
-                        torch.empty(0, device=device, dtype=torch.bfloat16),
-                        requires_grad=False,
-                    )
-                    setattr(module, name, new_param)
-                elif not isinstance(param.data, torch.Tensor) or param.device != torch.device(device):
+                    setattr(module, name, torch.nn.Parameter(
+                        torch.empty(0, device=device, dtype=torch.bfloat16), requires_grad=False))
+                elif param.device != torch.device(device):
                     try:
                         param.data = param.data.to(device=device, dtype=torch.bfloat16)
                     except (RuntimeError, NotImplementedError):
-                        pass  # GGMLLinear._qweight is uint8, skip dtype cast
+                        pass
+            for name, buf in module.named_buffers(recurse=False):
+                if buf.device.type == "meta":
+                    # Recreate meta buffers on device (e.g. RoPE inv_freq)
+                    module.register_buffer(name, torch.empty(0, device=device, dtype=buf.dtype))
+                elif buf.device != torch.device(device):
+                    module.register_buffer(name, buf.to(device))
     else:
         model = model.to(device).to(torch.bfloat16)
 

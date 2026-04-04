@@ -21,9 +21,26 @@ def _check_ggml() -> bool:
     global _HAS_GGML
     if _HAS_GGML is None:
         try:
-            torch.ops.tinyserve_ggml_ops.ggml_mul_mat_vec
+            torch.ops.tinyserve_ggml.ggml_mul_mat_vec
             _HAS_GGML = True
         except (AttributeError, RuntimeError):
+            # Try loading the JIT-compiled extension from torch cache
+            import glob
+            import os
+            search_paths = [
+                os.path.join(os.path.dirname(__file__), ".."),
+                ".",
+                os.path.expanduser("~/.cache/torch_extensions"),
+            ]
+            for base in search_paths:
+                for so_path in glob.glob(os.path.join(base, "**", "tinyserve_ggml*.so"), recursive=True):
+                    try:
+                        torch.ops.load_library(so_path)
+                        _HAS_GGML = True
+                        logger.info("Loaded ggml ops from %s", so_path)
+                        return True
+                    except (OSError, RuntimeError):
+                        pass
             _HAS_GGML = False
     return _HAS_GGML
 
@@ -59,7 +76,7 @@ class GGMLLinear(nn.Module):
 
         if batch == 1 and _check_ggml():
             x_2d = x.reshape(1, -1)
-            out = torch.ops.tinyserve_ggml_ops.ggml_mul_mat_vec(
+            out = torch.ops.tinyserve_ggml.ggml_mul_mat_vec(
                 x_2d, self._qweight, self._ggml_type, self.out_features, self.in_features,
             )
             if self.bias is not None:

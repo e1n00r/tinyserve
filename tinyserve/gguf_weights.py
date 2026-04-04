@@ -55,14 +55,10 @@ def _set_param(model: torch.nn.Module, hf_name: str, tensor: torch.Tensor):
         else:
             raise AttributeError(f"Cannot navigate to {hf_name}: missing {part}")
     final = parts[-1]
-    if hasattr(obj, final):
-        attr = getattr(obj, final)
-        if isinstance(attr, torch.nn.Parameter):
-            attr.data = tensor.to(dtype=attr.data.dtype, device=attr.data.device)
-        else:
-            setattr(obj, final, torch.nn.Parameter(tensor, requires_grad=False))
-    else:
-        setattr(obj, final, torch.nn.Parameter(tensor, requires_grad=False))
+    # Always use setattr with a new Parameter to handle meta tensors correctly.
+    # The old path (attr.data = tensor.to(...)) silently fails on meta device.
+    new_param = torch.nn.Parameter(tensor, requires_grad=False)
+    setattr(obj, final, new_param)
 
 
 def _build_expert_store_from_reader(
