@@ -7,6 +7,7 @@ import pytest
 
 from tinyserve.chunked import chunked_prefill, generate_chunked
 from tinyserve.static_kv_cache import StaticKVCache
+from tests.conftest import requires_cuda
 
 
 def _make_dummy_model(vocab_size=32, hidden=16, num_layers=2, num_kv_heads=2, head_dim=8):
@@ -207,3 +208,34 @@ def test_generate_chunked_eos_stops_early():
     # Total generated: 1 (prefill) + 3 (decode) = 4, but eos on 3rd decode
     # means we get 1 + 3 = 4 generated tokens.
     assert output.shape[1] == 5 + 4
+
+
+@requires_cuda
+def test_chunked_prefill_with_streaming_at_capacity():
+    """Chunked prefill filling KV to capacity + streaming eviction doesn't crash."""
+    from tinyserve.static_kv_cache import StaticKVCache
+    from tinyserve.chunked import chunked_prefill
+
+    cache = StaticKVCache(
+        max_seq_len=64, num_layers=2, num_kv_heads=1,
+        head_dim=4, device=torch.device("cuda"),
+    )
+    cache.enable_streaming(sink_size=4, window_size=28)  # max_kept=32
+
+    class KVPushModel:
+        def __call__(self, input_ids, past_key_values=None):
+            seq = input_ids.shape[1]
+            for layer in range(2):
+                k = torch.randn(1, 1, seq, 4, device="cuda", dtype=torch.bfloat16)
+                v = torch.randn(1, 1, seq, 4, device="cuda", dtype=torch.bfloat16)
+                past_key_values.update(k, v, layer)
+            class Out:
+                logits = torch.randn(1, seq, 10, device="cuda")
+            return Out()
+
+    # 128 tokens chunked at 32 — will fill and overflow KV, triggering eviction
+    ids = torch.zeros(1, 128, dtype=torch.long, device="cuda")
+    out = chunked_prefill(KVPushModel(), ids, cache, chunk_size=32)
+    assert out is not None
+    # After streaming eviction, seq_len should be capped
+    assert cache.get_seq_length(0) <= 32
