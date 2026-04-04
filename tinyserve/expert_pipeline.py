@@ -726,8 +726,8 @@ class ExpertPipeline:
         then GPU dequant → cache slot. No CPU blocking.
         BF16 path: direct pinned-CPU → VRAM-cache DMA.
         """
-        if self.cache is None:
-            return
+        if self.cache is None or self._native_quant:
+            return  # native-quant path handles its own cache fill in _execute_layer_experts_native
         # Convert tensor to list once — this sync is overlapped with attention compute.
         if isinstance(expert_ids, torch.Tensor):
             expert_ids = expert_ids.tolist()
