@@ -522,14 +522,38 @@ def load_from_gguf(
     else:
         def _map_name(gguf_name):
             hf, is_expert, _, _ = gguf_to_hf_name(gguf_name)
-            return hf, False, is_expert
+            return hf, False, is_expert, None
+
+    # Extract linear_attn head config for V-head reorder transforms (Qwen3.5MoE).
+    # These come from the HF config; defaults are safe for non-Qwen3.5 models
+    # (vhead_mode will always be None in that case).
+    _linear_num_k_heads: int = getattr(hf_config, "linear_num_key_heads", 0)
+    _linear_num_v_heads: int = getattr(hf_config, "linear_num_value_heads", 0)
+    _linear_k_head_dim: int = getattr(hf_config, "linear_key_head_dim", 0)
+    _linear_v_head_dim: int = getattr(hf_config, "linear_value_head_dim", 0)
+    _num_attn_heads: int = getattr(hf_config, "num_attention_heads", 0)
+    _hidden_size: int = getattr(hf_config, "hidden_size", 0)
+    _q_head_dim: int = (
+        getattr(hf_config, "head_dim", 0)
+        or (_hidden_size // _num_attn_heads if _num_attn_heads else 0)
+    )
+
+    if arch == "qwen35moe" and _linear_num_k_heads:
+        from .qwen35moe_mapper import apply_vhead_transform as _apply_vhead
+        logger.info(
+            "V-head reorder config: num_k=%d num_v=%d k_head_dim=%d v_head_dim=%d q_head_dim=%d",
+            _linear_num_k_heads, _linear_num_v_heads,
+            _linear_k_head_dim, _linear_v_head_dim, _q_head_dim,
+        )
+    else:
+        _apply_vhead = None  # type: ignore[assignment]
 
     linear_weights: dict[str, tuple[bytes, int, tuple[int, int]]] = {}
     loaded = 0
     skipped = 0
 
     for gguf_name in non_expert_names:
-        hf_name, needs_norm_offset, is_fused_expert = _map_name(gguf_name)
+        hf_name, needs_norm_offset, is_fused_expert, vhead_mode = _map_name(gguf_name)
 
         if is_fused_expert or hf_name is None:
             skipped += 1
@@ -548,12 +572,18 @@ def load_from_gguf(
             info = _find_tensor_info(reader, gguf_name)
             raw = reader.get_tensor_data(info)
 
+        # Tensors that need V-head reorder MUST be dequantized to BF16 first —
+        # quantized block layouts (Q4_K etc.) cannot have rows permuted in-place.
+        # They are stored as plain nn.Parameter (BF16) rather than GGMLLinear.
+        needs_dequant_for_vhead = vhead_mode is not None and _apply_vhead is not None
+
         # Linear layers with 2D weight and quantized type: keep native quant
         is_linear_weight = (
             len(info.shape) == 2
             and info.ggml_type in (2, 3, 6, 7, 8, 10, 11, 12, 13, 14, 15)
             and hf_name.endswith(".weight")
             and not needs_norm_offset  # norms must be float (need +1 offset)
+            and not needs_dequant_for_vhead  # vhead reorder requires float
             and "embed" not in hf_name
         )
 
@@ -563,7 +593,7 @@ def load_from_gguf(
             linear_weights[module_path] = (raw, info.ggml_type, (info.shape[1], info.shape[0]))
             loaded += 1
         else:
-            # Non-linear: dequant to BF16
+            # Non-linear or vhead-reorder: dequant to BF16
             try:
                 from .gguf_dequant_torch import dequant_tensor as _fast_dequant
                 tensor = _fast_dequant(raw, info.ggml_type, tuple(info.shape)).to(torch.bfloat16)
@@ -573,6 +603,19 @@ def load_from_gguf(
             # Apply norm +1 offset (GGUF stores w-1, HF expects w)
             if needs_norm_offset:
                 tensor = tensor + 1.0
+
+            # Apply V-head inverse reorder (tiled → grouped) or A_log inverse transform
+            if needs_dequant_for_vhead:
+                tensor = _apply_vhead(
+                    tensor,
+                    vhead_mode,
+                    num_k_heads=_linear_num_k_heads,
+                    num_v_heads=_linear_num_v_heads,
+                    num_q_heads=_num_attn_heads,
+                    k_head_dim=_linear_k_head_dim,
+                    v_head_dim=_linear_v_head_dim,
+                    q_head_dim=_q_head_dim,
+                )
 
             tensor = tensor.to(device)
 
