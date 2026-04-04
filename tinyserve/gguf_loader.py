@@ -149,7 +149,6 @@ _LAYER_MAP: dict[str, str] = {
     "ffn_down_exps.weight": "mlp.shared_expert.down_proj.weight",
     # Qwen3.5 shared expert with fused gate_up
     "ffn_gate_up_exps.weight": "mlp.shared_expert.gate_up_proj.weight",
-    "ffn_down_exps.weight": "mlp.shared_expert.down_proj.weight",
     # Attention biases (some architectures)
     "attn_q.bias": "self_attn.q_proj.bias",
     "attn_k.bias": "self_attn.k_proj.bias",

@@ -42,7 +42,7 @@ def test_cache_shrink_below_used_capacity_evicts_lru_experts():
         cache.allocate(0, i)
     cache.flush_slot_updates()
 
-    freed = cache.shrink(6)  # shrink by 6, only 0 free → must evict 6
+    cache.shrink(6)  # shrink by 6, only 0 free → must evict 6
     assert cache.capacity == 2
     assert len(cache._policy) == 2  # only 2 experts remain
 

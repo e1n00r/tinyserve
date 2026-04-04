@@ -29,7 +29,7 @@ from .profiler import OffloadProfiler
 from .ram_cache import madvise_willneed
 
 if TYPE_CHECKING:
-    pass
+    from .expert_batcher import BatchItem
 
 logger = logging.getLogger(__name__)
 
@@ -337,7 +337,9 @@ class ExpertPipeline:
             return
 
         if _cython_forward_hits is not None and not (_prof and _prof.enabled):
-            _fallback = lambda p, h_: forward_from_packed(self.template, p, self._param_refs, h_)
+            def _fallback(p, h_):
+                return forward_from_packed(self.template, p, self._param_refs, h_)
+
             _cython_forward_hits(
                 hits,
                 h,

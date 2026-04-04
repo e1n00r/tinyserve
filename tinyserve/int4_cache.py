@@ -14,9 +14,9 @@ import os
 from pathlib import Path
 
 import torch
+from safetensors.torch import save_file
 
 logger = logging.getLogger(__name__)
-from safetensors.torch import save_file
 
 
 def int4_cache_path(model_id: str) -> str:

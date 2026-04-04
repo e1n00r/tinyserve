@@ -24,6 +24,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 
@@ -141,8 +142,6 @@ class InferenceEngine:
 
             await asyncio.sleep(0)
 
-        elapsed = time.perf_counter() - req.start_time
-        n = len(req.generated)
         if not stream:
             yield self.tokenizer.decode(req.generated)
 
@@ -295,7 +294,7 @@ def create_app(
     max_concurrent: int = 4,
     timeout: float = 60.0,
     max_pending: int = 32,
-) -> "web.Application":
+) -> Any:
     """Create an aiohttp web application with OpenAI-compatible API."""
     try:
         from aiohttp import web

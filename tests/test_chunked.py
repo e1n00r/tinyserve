@@ -42,7 +42,9 @@ def _make_dummy_model(vocab_size=32, hidden=16, num_layers=2, num_kv_heads=2, he
     model = SimpleNamespace(__call__=forward, call_log=call_log)
     model.__call__ = forward
     # Make it callable
-    model_fn = lambda **kw: forward(**kw)
+    def model_fn(**kw):
+        return forward(**kw)
+
     model_fn.call_log = call_log
     return model_fn
 

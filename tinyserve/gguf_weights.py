@@ -11,7 +11,7 @@ import logging
 import torch
 
 from .gguf_dequant import _dequant_fused_tensor
-from .gguf_reader import GGUFTensorInfo
+from .gguf_reader import GGUFReader, GGUFTensorInfo
 
 logger = logging.getLogger(__name__)
 

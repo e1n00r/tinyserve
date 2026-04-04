@@ -10,6 +10,11 @@ import time
 
 import pytest
 
+try:
+    from aiohttp.test_utils import AioHTTPTestCase
+except ImportError:
+    AioHTTPTestCase = None
+
 from tinyserve.server import (
     ServerMetrics,
     _chat_chunk,
@@ -192,8 +197,6 @@ class TestServerMetrics:
 
 # --- HTTP endpoint tests (aiohttp AioHTTPTestCase) ---
 
-from aiohttp.test_utils import AioHTTPTestCase
-
 
 class TestHealthAPI(AioHTTPTestCase):
     async def get_application(self):
@@ -278,7 +281,7 @@ class TestChatCompletionsAPI(AioHTTPTestCase):
         assert resp.status == 200
         assert "text/event-stream" in resp.headers["Content-Type"]
         body = await resp.text()
-        lines = [l for l in body.strip().split("\n") if l.startswith("data:")]
+        lines = [line for line in body.strip().split("\n") if line.startswith("data:")]
         assert lines[-1] == "data: [DONE]"
         for line in lines[:-1]:
             payload = line[len("data: ") :]

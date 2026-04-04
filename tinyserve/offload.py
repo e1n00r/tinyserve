@@ -127,7 +127,6 @@ def _register_flex_attention() -> str:
     try:
         import transformers
         from torch.nn.attention.flex_attention import (
-            create_block_mask,
             flex_attention,
         )
 

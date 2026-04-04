@@ -40,14 +40,14 @@ def test_lfru_select_evict_speed():
     # Python baseline
     t0 = time.perf_counter()
     for _ in range(1000):
-        best_key = None
+        _best_key = None
         best_score = float("inf")
         for k, (slot, freq, last) in data.items():
             age = clock - last + 1
             score = freq / age
             if score < best_score:
                 best_score = score
-                best_key = k
+                _best_key = k
     py_time = time.perf_counter() - t0
 
     # Cython
