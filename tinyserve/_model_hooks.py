@@ -155,10 +155,10 @@ class OffloadedModel(nn.Module):
         cache_policy: str = "lfru",
         fp8: bool = True,
         adaptive_fate: bool = True,
-        profiler: "OffloadProfiler | None" = None,
+        profiler: OffloadProfiler | None = None,
         disk_offload: bool = False,
         ram_cache_gb: float = 0,
-    ) -> "OffloadedModel":
+    ) -> OffloadedModel:
         model.eval()
         layers = model.layers
 
@@ -185,12 +185,17 @@ class OffloadedModel(nn.Module):
                 for param in container.parameters():
                     param.data = torch.empty(0, device="cpu")
             import gc
+
             gc.collect()
 
             if disk_offload:
                 store, _, ram_cache = ExpertStore.from_safetensors(
-                    model_id, moe_block_attr, expert_list_attr, layer_indices,
-                    disk_offload=True, ram_cache_gb=ram_cache_gb,
+                    model_id,
+                    moe_block_attr,
+                    expert_list_attr,
+                    layer_indices,
+                    disk_offload=True,
+                    ram_cache_gb=ram_cache_gb,
                 )
                 # Create CPUExpertForward from the store layout.
                 from .cpu_expert import CPUExpertForward
@@ -201,7 +206,10 @@ class OffloadedModel(nn.Module):
                     cpu_expert = None
             else:
                 store, _ = ExpertStore.from_safetensors(
-                    model_id, moe_block_attr, expert_list_attr, layer_indices,
+                    model_id,
+                    moe_block_attr,
+                    expert_list_attr,
+                    layer_indices,
                 )
             template = _FusedExpertTemplate.from_layout(store.layout, first_container)
             template = template.to(device)

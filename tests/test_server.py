@@ -7,7 +7,6 @@ All async tests use aiohttp.test_utils.AioHTTPTestCase.
 import asyncio
 import json
 import time
-import unittest
 
 import pytest
 
@@ -51,6 +50,7 @@ class FakeEngine:
 
 # --- Unit tests for helper functions ---
 
+
 class TestMakeChatPrompt:
     def test_single_message(self):
         messages = [{"role": "user", "content": "Hello"}]
@@ -82,20 +82,20 @@ class TestChatChunk:
         raw = _chat_chunk("id-1", "hello", None)
         assert raw.startswith("data: ")
         assert raw.endswith("\n\n")
-        parsed = json.loads(raw[len("data: "):])
+        parsed = json.loads(raw[len("data: ") :])
         assert parsed["id"] == "id-1"
         assert parsed["choices"][0]["delta"]["content"] == "hello"
         assert parsed["choices"][0]["finish_reason"] is None
 
     def test_finish(self):
         raw = _chat_chunk("id-1", None, "stop")
-        parsed = json.loads(raw[len("data: "):])
+        parsed = json.loads(raw[len("data: ") :])
         assert parsed["choices"][0]["delta"] == {}
         assert parsed["choices"][0]["finish_reason"] == "stop"
 
     def test_object_type(self):
         raw = _chat_chunk("id-1", "x", None)
-        parsed = json.loads(raw[len("data: "):])
+        parsed = json.loads(raw[len("data: ") :])
         assert parsed["object"] == "chat.completion.chunk"
 
 
@@ -112,7 +112,7 @@ class TestChatResponse:
 class TestLegacyChunk:
     def test_structure(self):
         raw = _legacy_chunk("word", None)
-        parsed = json.loads(raw[len("data: "):])
+        parsed = json.loads(raw[len("data: ") :])
         assert parsed["choices"][0]["text"] == "word"
 
 
@@ -131,6 +131,7 @@ class TestErrorJson:
 
 
 # --- ServerMetrics tests ---
+
 
 class TestServerMetrics:
     def test_initial_state(self):
@@ -156,8 +157,12 @@ class TestServerMetrics:
         m = ServerMetrics()
         snap = m.snapshot()
         expected_keys = {
-            "requests_total", "requests_active", "tokens_generated",
-            "avg_tok_s", "expert_cache_hit_rate", "gpu_memory_used_gb",
+            "requests_total",
+            "requests_active",
+            "tokens_generated",
+            "avg_tok_s",
+            "expert_cache_hit_rate",
+            "gpu_memory_used_gb",
             "uptime_seconds",
         }
         assert set(snap.keys()) == expected_keys
@@ -188,7 +193,6 @@ class TestServerMetrics:
 # --- HTTP endpoint tests (aiohttp AioHTTPTestCase) ---
 
 from aiohttp.test_utils import AioHTTPTestCase
-from aiohttp import web
 
 
 class TestHealthAPI(AioHTTPTestCase):
@@ -277,7 +281,7 @@ class TestChatCompletionsAPI(AioHTTPTestCase):
         lines = [l for l in body.strip().split("\n") if l.startswith("data:")]
         assert lines[-1] == "data: [DONE]"
         for line in lines[:-1]:
-            payload = line[len("data: "):]
+            payload = line[len("data: ") :]
             chunk = json.loads(payload)
             assert "choices" in chunk
 
@@ -340,10 +344,7 @@ class TestConcurrencyAPI(AioHTTPTestCase):
         return create_app(FakeEngine(), model_name="test-model", max_concurrent=2)
 
     async def test_concurrent_requests(self):
-        tasks = [
-            self.client.post("/v1/completions", json={"prompt": f"req{i}", "max_tokens": 2})
-            for i in range(3)
-        ]
+        tasks = [self.client.post("/v1/completions", json={"prompt": f"req{i}", "max_tokens": 2}) for i in range(3)]
         responses = await asyncio.gather(*tasks)
         for r in responses:
             assert r.status == 200

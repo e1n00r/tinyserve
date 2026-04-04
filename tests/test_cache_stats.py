@@ -1,14 +1,13 @@
 """Tests for per-layer cache statistics."""
-import time
+
 import torch
-import pytest
 
 
 def _make_cache(capacity=4, num_layers=3, num_experts=8, device="cpu"):
     from tinyserve.expert_store import ExpertCache
+
     expert_bytes = 64
-    cache = ExpertCache(capacity, expert_bytes, torch.device(device),
-                            num_layers=num_layers, num_experts=num_experts)
+    cache = ExpertCache(capacity, expert_bytes, torch.device(device), num_layers=num_layers, num_experts=num_experts)
     return cache
 
 

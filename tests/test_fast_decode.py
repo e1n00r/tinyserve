@@ -5,7 +5,6 @@ predictions as the reference HF model.forward() path.  Uses a tiny
 synthetic GptOss config so no weights need to be downloaded.
 """
 
-import pytest
 import torch
 
 from tests.conftest import requires_cuda
@@ -102,12 +101,8 @@ def test_fast_generate_layerloop_matches_fast_generate():
     with torch.inference_mode():
         loop_ids = fast_generate_layerloop(model, input_ids, max_new_tokens=4)
 
-    assert ref_ids.shape == loop_ids.shape, (
-        f"shape mismatch: ref {ref_ids.shape} vs loop {loop_ids.shape}"
-    )
-    assert torch.equal(ref_ids, loop_ids), (
-        f"token mismatch:\n  ref:  {ref_ids.tolist()}\n  loop: {loop_ids.tolist()}"
-    )
+    assert ref_ids.shape == loop_ids.shape, f"shape mismatch: ref {ref_ids.shape} vs loop {loop_ids.shape}"
+    assert torch.equal(ref_ids, loop_ids), f"token mismatch:\n  ref:  {ref_ids.tolist()}\n  loop: {loop_ids.tolist()}"
 
 
 @requires_cuda
@@ -126,11 +121,7 @@ def test_fast_generate_layerloop_eos_stops_early():
 
     # eos = second generated token; loop must stop after 2 total tokens
     with torch.inference_mode():
-        ids = fast_generate_layerloop(
-            model, input_ids, max_new_tokens=10, eos_token_id=second_generated_token
-        )
+        ids = fast_generate_layerloop(model, input_ids, max_new_tokens=10, eos_token_id=second_generated_token)
 
     generated_len = ids.shape[1] - input_ids.shape[1]
-    assert generated_len == 2, (
-        f"expected 2 tokens generated (stopped at eos), got {generated_len}"
-    )
+    assert generated_len == 2, f"expected 2 tokens generated (stopped at eos), got {generated_len}"

@@ -52,7 +52,8 @@ class VRAMBudget:
         if slots_to_free <= 0:
             logger.warning(
                 "KV overflow: need %d tokens but expert cache at minimum (%d slots)",
-                tokens_needed, self.expert_cache.capacity,
+                tokens_needed,
+                self.expert_cache.capacity,
             )
             return False
 
@@ -62,10 +63,12 @@ class VRAMBudget:
         self._rebalance_count += 1
 
         logger.info(
-            "Rebalance #%d: freed %d expert slots → +%d KV tokens "
-            "(experts: %d/%d, KV: %d tokens)",
-            self._rebalance_count, slots_to_free, kv_tokens,
-            self.expert_cache.capacity, self.max_expert_capacity,
+            "Rebalance #%d: freed %d expert slots → +%d KV tokens (experts: %d/%d, KV: %d tokens)",
+            self._rebalance_count,
+            slots_to_free,
+            kv_tokens,
+            self.expert_cache.capacity,
+            self.max_expert_capacity,
             self.kv_cache.max_seq_len,
         )
         return True
@@ -80,7 +83,8 @@ class VRAMBudget:
         self.expert_cache.grow(slots_to_grow)
         logger.info(
             "KV released: grew expert cache %d → %d slots",
-            expert_cap, self.expert_cache.capacity,
+            expert_cap,
+            self.expert_cache.capacity,
         )
 
     # Keep check() for backward compat with tests, but simplified
@@ -94,17 +98,22 @@ class VRAMBudget:
                 max(1, int(self.kv_cache.max_seq_len * 0.25) // max(1, self.tokens_per_expert_slot)),
                 expert_cap - self.min_expert_capacity,
             )
-            return {"should_rebalance": True, "direction": "shrink_experts",
-                    "expert_slots_to_free": slots,
-                    "kv_tokens_gained": slots * self.tokens_per_expert_slot}
+            return {
+                "should_rebalance": True,
+                "direction": "shrink_experts",
+                "expert_slots_to_free": slots,
+                "kv_tokens_gained": slots * self.tokens_per_expert_slot,
+            }
 
         if kv_util <= 0.10 and expert_cap < self.max_expert_capacity:
-            return {"should_rebalance": True, "direction": "grow_experts",
-                    "expert_slots_to_free": -(self.max_expert_capacity - expert_cap),
-                    "kv_tokens_gained": 0}
+            return {
+                "should_rebalance": True,
+                "direction": "grow_experts",
+                "expert_slots_to_free": -(self.max_expert_capacity - expert_cap),
+                "kv_tokens_gained": 0,
+            }
 
-        return {"should_rebalance": False, "direction": None,
-                "expert_slots_to_free": 0, "kv_tokens_gained": 0}
+        return {"should_rebalance": False, "direction": None, "expert_slots_to_free": 0, "kv_tokens_gained": 0}
 
     def execute(self, action: dict) -> None:
         """Execute a check() action (backward compat)."""

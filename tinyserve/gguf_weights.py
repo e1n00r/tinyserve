@@ -10,8 +10,8 @@ import logging
 
 import torch
 
-from .gguf_reader import GGUFTensorInfo
 from .gguf_dequant import _dequant_fused_tensor
+from .gguf_reader import GGUFTensorInfo
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +71,9 @@ def _build_expert_store_from_reader(
     is_multi: bool,
 ):
     """Build a GGUFExpertStore from parsed expert tensor groups."""
+    from .expert_store import TensorLayout, _pack_tensors
     from .gguf_quant import q4k_expert_to_int4pack
     from .gguf_store import GGUFExpertStore
-    from .expert_store import TensorLayout, _pack_tensors
 
     layers = sorted({k[0] for k in expert_groups})
     experts_per_layer = sorted({k[1] for k in expert_groups})
@@ -106,8 +106,12 @@ def _build_expert_store_from_reader(
     down_shape = (down_info.shape[0], down_info.shape[1])
 
     g_packed, g_sz, u_packed, u_sz, d_packed, d_sz = q4k_expert_to_int4pack(
-        gate_data, up_data, down_data,
-        gate_shape, up_shape, down_shape,
+        gate_data,
+        up_data,
+        down_data,
+        gate_shape,
+        up_shape,
+        down_shape,
     )
 
     specs = {
@@ -121,7 +125,9 @@ def _build_expert_store_from_reader(
     layout = TensorLayout(specs)
 
     data = torch.empty(
-        num_layers, num_experts, layout.total_bytes,
+        num_layers,
+        num_experts,
+        layout.total_bytes,
         dtype=torch.uint8,
     )
     if torch.cuda.is_available():
@@ -145,7 +151,12 @@ def _build_expert_store_from_reader(
             d_s = (projs["down"].shape[0], projs["down"].shape[1])
 
             gp, gsz, up, usz, dp, dsz = q4k_expert_to_int4pack(
-                g_data, u_data, d_data, g_s, u_s, d_s,
+                g_data,
+                u_data,
+                d_data,
+                g_s,
+                u_s,
+                d_s,
             )
 
             tensors = {
@@ -202,7 +213,7 @@ def _build_expert_store_from_fused_reader(
 
         for expert_idx in range(n_exp):
             gate_e = gate_bf16[:, :, expert_idx]  # [intermediate, hidden]
-            up_e = up_bf16[:, :, expert_idx]      # [intermediate, hidden]
+            up_e = up_bf16[:, :, expert_idx]  # [intermediate, hidden]
             down_e = down_bf16[:, :, expert_idx]  # [hidden, intermediate]
 
             gate_up = torch.cat([gate_e, up_e], dim=0)  # [2*intermediate, hidden]

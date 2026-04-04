@@ -1,7 +1,6 @@
 """Tests for FlexAttention with StaticKVCache static shapes."""
 
 import torch
-import pytest
 
 from tests.conftest import requires_cuda
 
@@ -54,8 +53,12 @@ def test_flex_attention_no_recompile_on_length_change():
     from tinyserve.static_kv_cache import StaticKVCache
 
     cache = StaticKVCache(
-        max_seq_len=32, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cuda"), dtype=torch.bfloat16,
+        max_seq_len=32,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cuda"),
+        dtype=torch.bfloat16,
         static_shapes=True,
     )
 

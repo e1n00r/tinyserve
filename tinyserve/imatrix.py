@@ -1,9 +1,9 @@
 """Parse imatrix activation data for expert cache seeding."""
+
 from __future__ import annotations
 
 import re
 import struct
-from pathlib import Path
 
 
 def parse_imatrix_dat(path: str) -> dict[str, int]:

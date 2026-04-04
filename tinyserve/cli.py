@@ -116,7 +116,9 @@ def main() -> None:
     p_run.add_argument("--chunk-size", type=int, default=0, help="Prefill chunk size (0 = full prefill)")
     p_run.add_argument("--streaming", action="store_true", help="Enable StreamingLLM infinite context")
     p_run.add_argument("--streaming-sink-size", type=int, default=4, help="StreamingLLM sink tokens (default: 4)")
-    p_run.add_argument("--streaming-window-size", type=int, default=1024, help="StreamingLLM window tokens (default: 1024)")
+    p_run.add_argument(
+        "--streaming-window-size", type=int, default=1024, help="StreamingLLM window tokens (default: 1024)"
+    )
 
     p_info = sub.add_parser("info", help="Print model profile and expert layout")
     p_info.add_argument("--model", required=True, help="HuggingFace model id or local path")

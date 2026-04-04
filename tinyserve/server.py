@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from .paged_kv_cache import PagedKVPool, PagedRequestKVCache, PAGE_SIZE
+from .paged_kv_cache import PAGE_SIZE, PagedKVPool, PagedRequestKVCache
 from .static_kv_cache import StaticKVCache
 
 logger = logging.getLogger("tinyserve")
@@ -87,12 +87,8 @@ class InferenceEngine:
             next_tokens = []
             with torch.inference_mode():
                 for req in requests:
-                    token_input = torch.tensor(
-                        [[req.generated[-1]]], device="cuda"
-                    )
-                    out = self.model(
-                        input_ids=token_input, past_key_values=req.kv_cache
-                    )
+                    token_input = torch.tensor([[req.generated[-1]]], device="cuda")
+                    out = self.model(input_ids=token_input, past_key_values=req.kv_cache)
                     next_token = out.logits[:, -1:].argmax(dim=-1).item()
                     next_tokens.append(next_token)
             return next_tokens
@@ -115,6 +111,7 @@ class InferenceEngine:
         async with self._gpu_lock:
             if self.chunk_size > 0:
                 from .chunked import chunked_prefill
+
                 out = chunked_prefill(self.model, req.input_ids, req.kv_cache, self.chunk_size)
             else:
                 with torch.inference_mode():
@@ -200,7 +197,7 @@ class ServerMetrics:
     def snapshot(self) -> dict:
         gpu_mem = 0.0
         if torch.cuda.is_available():
-            gpu_mem = torch.cuda.memory_allocated() / (1024 ** 3)
+            gpu_mem = torch.cuda.memory_allocated() / (1024**3)
         return {
             "requests_total": self.requests_total,
             "requests_active": self.requests_active,
@@ -216,7 +213,9 @@ def _make_chat_prompt(messages: list[dict], tokenizer=None) -> str:
     if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
         try:
             return tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True,
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
             )
         except (ValueError, KeyError):
             logger.warning("chat template application failed, falling back to manual format", exc_info=True)
@@ -251,11 +250,13 @@ def _chat_response(comp_id: str, content: str, prompt_tokens: int, gen_tokens: i
         "id": comp_id,
         "object": "chat.completion",
         "created": int(time.time()),
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": content},
-            "finish_reason": "stop",
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
         "usage": {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": gen_tokens,
@@ -318,11 +319,16 @@ def create_app(
             prompt_len = len(engine.tokenizer.encode(prompt))
             logger.info(
                 "req=%s prompt=%d gen=%d tok/s=%.1f elapsed=%.2fs",
-                request_id, prompt_len, gen_tokens, tok_s, elapsed,
+                request_id,
+                prompt_len,
+                gen_tokens,
+                tok_s,
+                elapsed,
             )
 
-    async def _dispatch(http_req, prompt, max_tokens, stream, request_id,
-                        prompt_tokens, chunk_fn, done_chunk_fn, response_fn):
+    async def _dispatch(
+        http_req, prompt, max_tokens, stream, request_id, prompt_tokens, chunk_fn, done_chunk_fn, response_fn
+    ):
         if metrics.requests_active >= max_pending:
             return web.json_response(_error_json(503, "server overloaded"), status=503)
 
@@ -347,7 +353,7 @@ def create_app(
                                 if http_req.transport is None or http_req.transport.is_closing():
                                     return resp
                                 await resp.write(chunk_fn(token_text, None).encode())
-                    except (TimeoutError, asyncio.TimeoutError):
+                    except TimeoutError:
                         pass
                     await resp.write(done_chunk_fn().encode())
                     await resp.write(b"data: [DONE]\n\n")
@@ -361,13 +367,12 @@ def create_app(
                             async for t in gen:
                                 text = t
                                 gen_count += 1
-                    except (TimeoutError, asyncio.TimeoutError):
+                    except TimeoutError:
                         return web.json_response(
-                            _error_json(504, "request timed out"), status=504,
+                            _error_json(504, "request timed out"),
+                            status=504,
                         )
-                    return web.json_response(
-                        response_fn(request_id, text, prompt_tokens, gen_count)
-                    )
+                    return web.json_response(response_fn(request_id, text, prompt_tokens, gen_count))
             finally:
                 metrics.requests_active -= 1
 
@@ -395,8 +400,15 @@ def create_app(
             return _chat_chunk(request_id, None, "stop")
 
         return await _dispatch(
-            http_req, prompt, max_tokens, stream, request_id,
-            prompt_tokens, chunk_fn, done_fn, _chat_response,
+            http_req,
+            prompt,
+            max_tokens,
+            stream,
+            request_id,
+            prompt_tokens,
+            chunk_fn,
+            done_fn,
+            _chat_response,
         )
 
     async def handle_completions(http_req):
@@ -419,26 +431,39 @@ def create_app(
             return _legacy_chunk("", "stop")
 
         return await _dispatch(
-            http_req, prompt, max_tokens, stream, request_id,
-            prompt_tokens, _legacy_chunk, done_fn, _legacy_response,
+            http_req,
+            prompt,
+            max_tokens,
+            stream,
+            request_id,
+            prompt_tokens,
+            _legacy_chunk,
+            done_fn,
+            _legacy_response,
         )
 
     async def handle_models(http_req):
-        return web.json_response({
-            "object": "list",
-            "data": [{
-                "id": model_name,
-                "object": "model",
-                "owned_by": "tinyserve",
-            }],
-        })
+        return web.json_response(
+            {
+                "object": "list",
+                "data": [
+                    {
+                        "id": model_name,
+                        "object": "model",
+                        "owned_by": "tinyserve",
+                    }
+                ],
+            }
+        )
 
     async def handle_health(http_req):
-        return web.json_response({
-            "status": "ok",
-            "model": model_name,
-            "requests_active": metrics.requests_active,
-        })
+        return web.json_response(
+            {
+                "status": "ok",
+                "model": model_name,
+                "requests_active": metrics.requests_active,
+            }
+        )
 
     async def handle_metrics(http_req):
         return web.json_response(metrics.snapshot())
@@ -476,11 +501,14 @@ def main():
     parser.add_argument("--chunk-size", type=int, default=0, help="Prefill chunk size (0 = full prefill)")
     parser.add_argument("--streaming", action="store_true", help="Enable StreamingLLM infinite context")
     parser.add_argument("--streaming-sink-size", type=int, default=4, help="StreamingLLM sink tokens (default: 4)")
-    parser.add_argument("--streaming-window-size", type=int, default=1024, help="StreamingLLM window tokens (default: 1024)")
+    parser.add_argument(
+        "--streaming-window-size", type=int, default=1024, help="StreamingLLM window tokens (default: 1024)"
+    )
     args = parser.parse_args()
 
-    from .offload import TinyserveConfig, load_and_offload
     from transformers import AutoTokenizer
+
+    from .offload import TinyserveConfig, load_and_offload
 
     kv_dtype = torch.float8_e4m3fn if args.kv_fp8 else torch.bfloat16
     cfg = TinyserveConfig(
@@ -500,6 +528,7 @@ def main():
     model_name = args.model.split("/")[-1] if "/" in args.model else args.model
 
     from aiohttp import web
+
     app = create_app(
         engine,
         model_name=model_name,

@@ -37,7 +37,7 @@ class GGUFINT4Forward:
             off = layout.offsets[name]
             sz = layout.sizes[name]
             shape, dtype = layout.specs[name]
-            return expert_packed[off:off + sz].view(dtype).view(shape)
+            return expert_packed[off : off + sz].view(dtype).view(shape)
 
         gate_packed = _load("gate_packed")
         gate_sz = _load("gate_sz")
@@ -52,21 +52,15 @@ class GGUFINT4Forward:
         try:
             torch.set_num_threads(self._num_threads)
 
-            gate_out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-                h, gate_packed, self.group_size, gate_sz
-            )
-            up_out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-                h, up_packed, self.group_size, up_sz
-            )
+            gate_out = torch.ops.aten._weight_int4pack_mm_for_cpu(h, gate_packed, self.group_size, gate_sz)
+            up_out = torch.ops.aten._weight_int4pack_mm_for_cpu(h, up_packed, self.group_size, up_sz)
 
             if self._act_fn is not None:
                 gated = self._act_fn(gate_out) * up_out
             else:
                 gated = F.silu(gate_out) * up_out
 
-            out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-                gated, down_packed, self.group_size, down_sz
-            )
+            out = torch.ops.aten._weight_int4pack_mm_for_cpu(gated, down_packed, self.group_size, down_sz)
         finally:
             torch.set_num_threads(old_threads)
 
@@ -133,8 +127,12 @@ class GGUFExpertStore:
         down_shape = (down_info.shape[0], down_info.shape[1])
 
         g_packed, g_sz, u_packed, u_sz, d_packed, d_sz = q4k_expert_to_int4pack(
-            gate_data, up_data, down_data,
-            gate_shape, up_shape, down_shape,
+            gate_data,
+            up_data,
+            down_data,
+            gate_shape,
+            up_shape,
+            down_shape,
         )
 
         # Store pre-converted INT4 packed tensors as raw bytes
@@ -150,7 +148,9 @@ class GGUFExpertStore:
 
         # Allocate and pack all experts
         data = torch.empty(
-            num_layers, num_experts, layout.total_bytes,
+            num_layers,
+            num_experts,
+            layout.total_bytes,
             dtype=torch.uint8,
         )
         if torch.cuda.is_available():
@@ -170,7 +170,12 @@ class GGUFExpertStore:
                 d_s = (projs["down"].shape[0], projs["down"].shape[1])
 
                 gp, gsz, up, usz, dp, dsz = q4k_expert_to_int4pack(
-                    g_data, u_data, d_data, g_s, u_s, d_s,
+                    g_data,
+                    u_data,
+                    d_data,
+                    g_s,
+                    u_s,
+                    d_s,
                 )
 
                 tensors = {

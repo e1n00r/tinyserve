@@ -2,7 +2,6 @@
 
 import torch
 import torch.nn.functional as F
-import pytest
 
 
 class FakeModule:
@@ -31,7 +30,7 @@ class TestSdpaSlidingWindowDecode:
         k = torch.randn(N, G, S, E, dtype=torch.bfloat16)
         v = torch.randn(N, G, S, E, dtype=torch.bfloat16)
 
-        out, _ = sdpa_fn(module, q, k, v, attention_mask=None, scaling=1.0 / (E ** 0.5))
+        out, _ = sdpa_fn(module, q, k, v, attention_mask=None, scaling=1.0 / (E**0.5))
         assert out.shape == (N, 1, H, E)
         assert torch.isfinite(out).all()
 
@@ -47,10 +46,8 @@ class TestSdpaSlidingWindowDecode:
         k = torch.randn(N, G, S, E, dtype=torch.bfloat16)
         v = torch.randn(N, G, S, E, dtype=torch.bfloat16)
 
-        out_full, _ = sdpa_fn(module, q, k, v, attention_mask=None,
-                              scaling=1.0 / (E ** 0.5), sliding_window=None)
-        out_windowed, _ = sdpa_fn(module, q, k, v, attention_mask=None,
-                                  scaling=1.0 / (E ** 0.5), sliding_window=window)
+        out_full, _ = sdpa_fn(module, q, k, v, attention_mask=None, scaling=1.0 / (E**0.5), sliding_window=None)
+        out_windowed, _ = sdpa_fn(module, q, k, v, attention_mask=None, scaling=1.0 / (E**0.5), sliding_window=window)
 
         assert out_windowed.shape == (N, 1, H, E)
         assert torch.isfinite(out_windowed).all()
@@ -69,16 +66,19 @@ class TestSdpaSlidingWindowDecode:
         k = torch.randn(N, G, S, E, dtype=torch.bfloat16)
         v = torch.randn(N, G, S, E, dtype=torch.bfloat16)
 
-        out_sw, _ = sdpa_fn(module, q, k, v, attention_mask=None,
-                            scaling=1.0 / (E ** 0.5), sliding_window=window)
+        out_sw, _ = sdpa_fn(module, q, k, v, attention_mask=None, scaling=1.0 / (E**0.5), sliding_window=window)
 
         # Manual: expand GQA and slice to last W
         k_exp = k.repeat_interleave(H // G, dim=1)
         v_exp = v.repeat_interleave(H // G, dim=1)
         out_manual = F.scaled_dot_product_attention(
-            q, k_exp[:, :, -window:], v_exp[:, :, -window:],
-            attn_mask=None, dropout_p=0.0, is_causal=False,
-            scale=1.0 / (E ** 0.5),
+            q,
+            k_exp[:, :, -window:],
+            v_exp[:, :, -window:],
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=1.0 / (E**0.5),
         )
         out_manual = out_manual.transpose(1, 2).contiguous()
 
@@ -96,10 +96,8 @@ class TestSdpaSlidingWindowDecode:
         k = torch.randn(N, G, S, E, dtype=torch.bfloat16)
         v = torch.randn(N, G, S, E, dtype=torch.bfloat16)
 
-        out_full, _ = sdpa_fn(module, q, k, v, attention_mask=None,
-                              scaling=1.0 / (E ** 0.5), sliding_window=None)
-        out_windowed, _ = sdpa_fn(module, q, k, v, attention_mask=None,
-                                  scaling=1.0 / (E ** 0.5), sliding_window=window)
+        out_full, _ = sdpa_fn(module, q, k, v, attention_mask=None, scaling=1.0 / (E**0.5), sliding_window=None)
+        out_windowed, _ = sdpa_fn(module, q, k, v, attention_mask=None, scaling=1.0 / (E**0.5), sliding_window=window)
 
         # Should be identical since window >= S
         assert torch.allclose(out_full, out_windowed, atol=1e-3)
@@ -115,10 +113,8 @@ class TestSdpaSlidingWindowDecode:
         k = torch.randn(N, G, S, E, dtype=torch.bfloat16)
         v = torch.randn(N, G, S, E, dtype=torch.bfloat16)
 
-        out_none, _ = sdpa_fn(module, q, k, v, attention_mask=None,
-                              scaling=1.0 / (E ** 0.5), sliding_window=None)
-        out_sw, _ = sdpa_fn(module, q, k, v, attention_mask=None,
-                            scaling=1.0 / (E ** 0.5), sliding_window=16)
+        out_none, _ = sdpa_fn(module, q, k, v, attention_mask=None, scaling=1.0 / (E**0.5), sliding_window=None)
+        out_sw, _ = sdpa_fn(module, q, k, v, attention_mask=None, scaling=1.0 / (E**0.5), sliding_window=16)
 
         # Both should be identical since prefill uses is_causal=True, no window slicing
         assert torch.allclose(out_none, out_sw, atol=1e-3)
@@ -135,8 +131,7 @@ class TestSdpaSlidingWindowDecode:
         k = torch.randn(N, G, S, E, dtype=torch.bfloat16)
         v = torch.randn(N, G, S, E, dtype=torch.bfloat16)
 
-        out, _ = sdpa_fn(module, q, k, v, attention_mask=None,
-                         scaling=1.0 / (E ** 0.5), sliding_window=window)
+        out, _ = sdpa_fn(module, q, k, v, attention_mask=None, scaling=1.0 / (E**0.5), sliding_window=window)
 
         assert out.shape == (N, 1, H, E)
         assert torch.isfinite(out).all()

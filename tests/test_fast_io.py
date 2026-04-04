@@ -1,6 +1,4 @@
 import os
-import tempfile
-import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -112,10 +110,7 @@ class TestReadExpertAsync:
         executor = ThreadPoolExecutor(max_workers=4)
         try:
             dests = [torch.empty(expert_bytes, dtype=torch.uint8) for _ in range(num_experts)]
-            futures = [
-                reader.read_expert_async(0, i, dests[i], executor)
-                for i in range(num_experts)
-            ]
+            futures = [reader.read_expert_async(0, i, dests[i], executor) for i in range(num_experts)]
             for fut in futures:
                 fut.result(timeout=5.0)
             for i in range(num_experts):
@@ -134,13 +129,13 @@ class TestPreadMatchesMmap:
         fpath = tmp_path / "experts.bin"
 
         import numpy as np
+
         total_size = num_layers * num_experts * expert_bytes
         rng = np.random.RandomState(42)
         raw = rng.randint(0, 256, size=total_size, dtype=np.uint8)
         fpath.write_bytes(bytes(raw))
 
-        mmap_arr = np.memmap(str(fpath), dtype=np.uint8, mode="r",
-                             shape=(num_layers, num_experts, expert_bytes))
+        mmap_arr = np.memmap(str(fpath), dtype=np.uint8, mode="r", shape=(num_layers, num_experts, expert_bytes))
         mmap_tensor = torch.from_numpy(mmap_arr)
 
         offsets = {}
@@ -155,9 +150,7 @@ class TestPreadMatchesMmap:
                     dest = torch.empty(expert_bytes, dtype=torch.uint8)
                     reader.read_expert(li, ei, dest)
                     mmap_data = mmap_tensor[li, ei]
-                    assert torch.equal(dest, mmap_data), (
-                        f"Mismatch at layer={li}, expert={ei}"
-                    )
+                    assert torch.equal(dest, mmap_data), f"Mismatch at layer={li}, expert={ei}"
         finally:
             reader.close()
             del mmap_tensor, mmap_arr

@@ -9,23 +9,23 @@ import torch
 from tinyserve.gguf_loader import (
     GGUFModelConfig,
     MultiShardGGUFReader,
-    config_from_metadata,
-    gguf_to_hf_name,
-    hf_to_gguf_name,
-    open_gguf,
     _build_expert_store_from_fused_reader,
     _dequant_fused_tensor,
     _dequant_tensor,
     _find_tensor_info,
     _get_param,
     _set_param,
+    config_from_metadata,
+    gguf_to_hf_name,
+    hf_to_gguf_name,
+    open_gguf,
 )
-from tinyserve.gguf_reader import GGUFReader, GGUFTensorInfo
-
+from tinyserve.gguf_reader import GGUFReader
 
 # ---------------------------------------------------------------------------
 # Helpers for writing synthetic GGUF files
 # ---------------------------------------------------------------------------
+
 
 def _write_string(f, s: str):
     encoded = s.encode("utf-8")
@@ -119,6 +119,7 @@ def _make_f16_tensor_data(shape: tuple[int, ...], fill_value: float = 1.0) -> by
 # Test: GGUF -> HF tensor name mapping
 # ---------------------------------------------------------------------------
 
+
 class TestTensorNameMapping:
     @pytest.mark.parametrize(
         "gguf_name, expected_hf, expected_expert, expected_layer, expected_expert_idx",
@@ -126,77 +127,107 @@ class TestTensorNameMapping:
             (
                 "token_embd.weight",
                 "model.embed_tokens.weight",
-                False, None, None,
+                False,
+                None,
+                None,
             ),
             (
                 "output_norm.weight",
                 "model.norm.weight",
-                False, None, None,
+                False,
+                None,
+                None,
             ),
             (
                 "output.weight",
                 "lm_head.weight",
-                False, None, None,
+                False,
+                None,
+                None,
             ),
             (
                 "blk.0.attn_q.weight",
                 "model.layers.0.self_attn.q_proj.weight",
-                False, 0, None,
+                False,
+                0,
+                None,
             ),
             (
                 "blk.5.attn_k.weight",
                 "model.layers.5.self_attn.k_proj.weight",
-                False, 5, None,
+                False,
+                5,
+                None,
             ),
             (
                 "blk.0.attn_v.weight",
                 "model.layers.0.self_attn.v_proj.weight",
-                False, 0, None,
+                False,
+                0,
+                None,
             ),
             (
                 "blk.0.attn_output.weight",
                 "model.layers.0.self_attn.o_proj.weight",
-                False, 0, None,
+                False,
+                0,
+                None,
             ),
             (
                 "blk.3.attn_norm.weight",
                 "model.layers.3.input_layernorm.weight",
-                False, 3, None,
+                False,
+                3,
+                None,
             ),
             (
                 "blk.3.ffn_norm.weight",
                 "model.layers.3.post_attention_layernorm.weight",
-                False, 3, None,
+                False,
+                3,
+                None,
             ),
             (
                 "blk.0.ffn_gate_inp.weight",
                 "model.layers.0.mlp.gate.weight",
-                False, 0, None,
+                False,
+                0,
+                None,
             ),
             (
                 "blk.0.ffn_gate.0.weight",
                 "model.layers.0.mlp.experts.0.gate_proj.weight",
-                True, 0, 0,
+                True,
+                0,
+                0,
             ),
             (
                 "blk.2.ffn_up.7.weight",
                 "model.layers.2.mlp.experts.7.up_proj.weight",
-                True, 2, 7,
+                True,
+                2,
+                7,
             ),
             (
                 "blk.1.ffn_down.3.weight",
                 "model.layers.1.mlp.experts.3.down_proj.weight",
-                True, 1, 3,
+                True,
+                1,
+                3,
             ),
             (
                 "blk.0.ffn_gate_exps.weight",
                 "model.layers.0.mlp.shared_expert.gate_proj.weight",
-                False, 0, None,
+                False,
+                0,
+                None,
             ),
             (
                 "blk.0.ffn_down_exps.weight",
                 "model.layers.0.mlp.shared_expert.down_proj.weight",
-                False, 0, None,
+                False,
+                0,
+                None,
             ),
         ],
     )
@@ -253,6 +284,7 @@ class TestTensorNameMapping:
 # ---------------------------------------------------------------------------
 # Test: Config extraction from GGUF metadata
 # ---------------------------------------------------------------------------
+
 
 class TestConfigFromMetadata:
     def test_qwen3_moe_metadata(self):
@@ -332,6 +364,7 @@ class TestConfigFromMetadata:
 # Test: Non-expert weight dequantization
 # ---------------------------------------------------------------------------
 
+
 class TestDequantTensor:
     def test_f32_dequant(self, tmp_path):
         shape = (4, 8)
@@ -389,6 +422,7 @@ class TestDequantTensor:
 # ---------------------------------------------------------------------------
 # Test: Multi-shard GGUF discovery and merging
 # ---------------------------------------------------------------------------
+
 
 class TestMultiShardGGUF:
     def _create_shard(self, directory, shard_num, total_shards, tensor_name, shape, fill_value):
@@ -488,6 +522,7 @@ class TestMultiShardGGUF:
 # Test: Parameter navigation helpers
 # ---------------------------------------------------------------------------
 
+
 class TestParamHelpers:
     def test_get_param_simple(self):
         model = torch.nn.Module()
@@ -532,6 +567,7 @@ class TestParamHelpers:
 # Test: Q8_0 dequantization
 # ---------------------------------------------------------------------------
 
+
 class TestQ8_0Dequant:
     def test_q8_0_dequant_known_values(self, tmp_path):
         """Q8_0 block: 2-byte float16 scale + 32 int8 quants = 34 bytes per block."""
@@ -565,6 +601,7 @@ class TestQ8_0Dequant:
 # Test: find_tensor_info
 # ---------------------------------------------------------------------------
 
+
 class TestFindTensorInfo:
     def test_find_existing(self, tmp_path):
         path = tmp_path / "test.gguf"
@@ -597,6 +634,7 @@ class TestFindTensorInfo:
 # ---------------------------------------------------------------------------
 # Test: GGUFModelConfig dataclass
 # ---------------------------------------------------------------------------
+
 
 class TestGGUFModelConfig:
     def test_defaults(self):
@@ -633,9 +671,11 @@ class TestMultiShardFusedExperts:
     def _create_fused_shard(self, path, shard_num, total_shards, layers, n_experts=4, ffn_size=8, hidden=16):
         shard_name = f"model-{shard_num:05d}-of-{total_shards:05d}.gguf"
         shard_path = path / shard_name
-        projections = [("gate", (hidden, ffn_size, n_experts)),
-                       ("up", (hidden, ffn_size, n_experts)),
-                       ("down", (ffn_size, hidden, n_experts))]
+        projections = [
+            ("gate", (hidden, ffn_size, n_experts)),
+            ("up", (hidden, ffn_size, n_experts)),
+            ("down", (ffn_size, hidden, n_experts)),
+        ]
 
         tensors = []
         for layer in layers:
@@ -736,9 +776,7 @@ class TestDequantFusedTensor:
 class TestBuildExpertStoreFromFusedReader:
     """Tests for _build_expert_store_from_fused_reader."""
 
-    def _create_fused_single_gguf(
-        self, path, n_layers=2, n_experts=4, ffn_size=8, hidden=16, ggml_type=0
-    ):
+    def _create_fused_single_gguf(self, path, n_layers=2, n_experts=4, ffn_size=8, hidden=16, ggml_type=0):
         """Create a single GGUF with F32 fused expert tensors.
 
         Shapes follow Qwen convention: [out_dim, in_dim, n_experts].
@@ -811,12 +849,14 @@ class TestBuildExpertStoreFromFusedReader:
             arr = np.zeros(shape, dtype=np.float32)
             for e in range(n_experts):
                 arr[:, :, e] = float(e + 1)
-            tensors.append({
-                "name": f"blk.0.ffn_{proj}_exps.weight",
-                "shape": shape,
-                "ggml_type": 0,
-                "data": arr.tobytes(),
-            })
+            tensors.append(
+                {
+                    "name": f"blk.0.ffn_{proj}_exps.weight",
+                    "shape": shape,
+                    "ggml_type": 0,
+                    "data": arr.tobytes(),
+                }
+            )
         _create_gguf_with_metadata(path, {"general.architecture": "test"}, tensors)
 
         reader = GGUFReader(path)
@@ -829,18 +869,16 @@ class TestBuildExpertStoreFromFusedReader:
             gu_offset = layout.offsets["gate_up_proj"]
             gu_nbytes = layout.sizes["gate_up_proj"]
             gu_shape, gu_dtype = layout.specs["gate_up_proj"]
-            gu = raw[gu_offset:gu_offset + gu_nbytes].view(gu_dtype).reshape(gu_shape).float()
+            gu = raw[gu_offset : gu_offset + gu_nbytes].view(gu_dtype).reshape(gu_shape).float()
 
             dn_offset = layout.offsets["down_proj"]
             dn_nbytes = layout.sizes["down_proj"]
             dn_shape, dn_dtype = layout.specs["down_proj"]
-            dn = raw[dn_offset:dn_offset + dn_nbytes].view(dn_dtype).reshape(dn_shape).float()
+            dn = raw[dn_offset : dn_offset + dn_nbytes].view(dn_dtype).reshape(dn_shape).float()
 
             expected_val = float(e + 1)
-            assert torch.allclose(gu, torch.full_like(gu, expected_val), atol=0.02), \
-                f"Expert {e} gate_up_proj mismatch"
-            assert torch.allclose(dn, torch.full_like(dn, expected_val), atol=0.02), \
-                f"Expert {e} down_proj mismatch"
+            assert torch.allclose(gu, torch.full_like(gu, expected_val), atol=0.02), f"Expert {e} gate_up_proj mismatch"
+            assert torch.allclose(dn, torch.full_like(dn, expected_val), atol=0.02), f"Expert {e} down_proj mismatch"
         reader.close()
 
     def test_fused_expert_excluded_from_non_expert_loading(self, tmp_path):
@@ -851,6 +889,7 @@ class TestBuildExpertStoreFromFusedReader:
 
         reader = GGUFReader(path)
         import re as _re
+
         _fused_re = _re.compile(r"^blk\.\d+\.ffn_(gate|up|down)_exps\.weight$")
         for t in reader.tensors:
             if _fused_re.match(t.name):

@@ -24,8 +24,8 @@ class TinyFusedExpert(nn.Module):
 
 
 def _make_pipeline(num_experts=4, hidden=16, intermediate=32, device="cuda"):
-    from tinyserve.expert_store import ExpertStore, ExpertCache
     from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertCache, ExpertStore
 
     weights = {}
     for li in range(1):
@@ -40,10 +40,12 @@ def _make_pipeline(num_experts=4, hidden=16, intermediate=32, device="cuda"):
     staging_buffer_b = store.allocate_buffer(torch.device(device))
     ts = torch.cuda.Stream(torch.device(device))
     cs = torch.cuda.Stream(torch.device(device))
-    cache = ExpertCache(num_experts, store.buffer_expert_bytes, torch.device(device),
-                           num_layers=1, num_experts=num_experts)
-    pipeline = ExpertPipeline(store, template, torch.device(device),
-                                     staging_buffer_a, staging_buffer_b, ts, cs, cache=cache)
+    cache = ExpertCache(
+        num_experts, store.buffer_expert_bytes, torch.device(device), num_layers=1, num_experts=num_experts
+    )
+    pipeline = ExpertPipeline(
+        store, template, torch.device(device), staging_buffer_a, staging_buffer_b, ts, cs, cache=cache
+    )
     return pipeline
 
 

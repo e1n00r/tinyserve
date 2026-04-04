@@ -42,6 +42,7 @@ class ExpertCache:
         # Slot map: CPU array is primary (written per-allocate, no CUDA kernel),
         # GPU tensor is synced lazily before lookup_slots reads it.
         import numpy as np
+
         self._slot_map: torch.Tensor | None = None
         self._slot_map_cpu: np.ndarray | None = None
         self._slot_map_dirty: bool = False
@@ -84,6 +85,7 @@ class ExpertCache:
     def _ensure_slot_map(self, layer_idx: int, expert_idx: int):
         """Lazily create or grow the slot map to fit (layer_idx, expert_idx)."""
         import numpy as np
+
         nl = max(self._slot_map_dims[0], layer_idx + 1)
         ne = max(self._slot_map_dims[1], expert_idx + 1)
         if self._slot_map_cpu is None:
@@ -93,7 +95,7 @@ class ExpertCache:
         elif nl > self._slot_map_cpu.shape[0] or ne > self._slot_map_cpu.shape[1]:
             new_cpu = np.full((nl, ne), -1, dtype=np.int32)
             old = self._slot_map_cpu
-            new_cpu[:old.shape[0], :old.shape[1]] = old
+            new_cpu[: old.shape[0], : old.shape[1]] = old
             self._slot_map_cpu = new_cpu
             self._slot_map = torch.from_numpy(new_cpu).to(dtype=torch.int32, device=self.device)
             self._slot_map_dims = (nl, ne)
@@ -252,9 +254,7 @@ class ExpertCache:
             return
         old_capacity = self.capacity
         new_capacity = old_capacity + n_slots
-        new_packed = torch.empty(
-            new_capacity, self.expert_bytes, dtype=torch.uint8, device=self.device
-        )
+        new_packed = torch.empty(new_capacity, self.expert_bytes, dtype=torch.uint8, device=self.device)
         new_packed[:old_capacity] = self._packed
         self._packed = new_packed
         self.capacity = new_capacity

@@ -1,11 +1,10 @@
 """Tests for imatrix parsing and expert cache seeding."""
+
 from __future__ import annotations
 
 import struct
 import tempfile
-from pathlib import Path
 
-import pytest
 import torch
 
 from tests.conftest import requires_cuda
@@ -40,6 +39,7 @@ def _write_imatrix_dat(entries: list[tuple[str, int, int]]) -> str:
 # ---------------------------------------------------------------------------
 # test_parse_imatrix_dat
 # ---------------------------------------------------------------------------
+
 
 def test_parse_imatrix_dat_basic():
     """Parsing returns correct name-to-ncall mapping."""
@@ -86,6 +86,7 @@ def test_parse_imatrix_dat_multiple_projections():
 # ---------------------------------------------------------------------------
 # test_rank_experts_per_layer
 # ---------------------------------------------------------------------------
+
 
 def test_rank_experts_per_layer_basic():
     """Experts are sorted by activation count descending."""
@@ -157,10 +158,11 @@ def test_rank_experts_multi_layer():
 # test_seed_cache_from_ranking
 # ---------------------------------------------------------------------------
 
+
 @requires_cuda
 def test_seed_cache_from_ranking_experts_cached():
     """Top experts land in cache; contains() returns True after seeding."""
-    from tinyserve.expert_store import ExpertStore, ExpertCache
+    from tinyserve.expert_store import ExpertCache, ExpertStore
     from tinyserve.imatrix import rank_experts_from_imatrix, seed_cache_from_ranking
 
     num_layers, num_experts = 2, 4
@@ -202,8 +204,8 @@ def test_seed_cache_from_ranking_experts_cached():
 @requires_cuda
 def test_seed_cache_respects_capacity():
     """seed_cache_from_ranking never overflows cache capacity."""
-    from tinyserve.expert_store import ExpertStore, ExpertCache
-    from tinyserve.imatrix import rank_experts_from_imatrix, seed_cache_from_ranking
+    from tinyserve.expert_store import ExpertCache, ExpertStore
+    from tinyserve.imatrix import seed_cache_from_ranking
 
     num_layers, num_experts = 4, 4
     expert_weights = {
@@ -226,13 +228,12 @@ def test_seed_cache_respects_capacity():
 @requires_cuda
 def test_seed_cache_slot_map_usable_after_seeding():
     """After seeding, lookup_slots returns valid slot indices for cached experts."""
-    from tinyserve.expert_store import ExpertStore, ExpertCache
-    from tinyserve.imatrix import rank_experts_from_imatrix, seed_cache_from_ranking
+    from tinyserve.expert_store import ExpertCache, ExpertStore
+    from tinyserve.imatrix import seed_cache_from_ranking
 
     num_layers, num_experts = 1, 4
     expert_weights = {
-        (0, ei): {"w.weight": torch.full((4, 4), float(ei), dtype=torch.bfloat16)}
-        for ei in range(num_experts)
+        (0, ei): {"w.weight": torch.full((4, 4), float(ei), dtype=torch.bfloat16)} for ei in range(num_experts)
     }
     store = ExpertStore.from_dict(expert_weights, num_layers, num_experts)
 

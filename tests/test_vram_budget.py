@@ -1,13 +1,13 @@
 """Tests for dynamic VRAM rebalancing."""
+
 import torch
-import pytest
 
 
 def _make_cache(capacity=10, num_layers=2, num_experts=8, device="cpu"):
     from tinyserve.expert_store import ExpertCache
+
     expert_bytes = 64
-    cache = ExpertCache(capacity, expert_bytes, torch.device(device),
-                            num_layers=num_layers, num_experts=num_experts)
+    cache = ExpertCache(capacity, expert_bytes, torch.device(device), num_layers=num_layers, num_experts=num_experts)
     return cache
 
 
@@ -63,10 +63,8 @@ def test_cache_capacity_recovers_after_shrink_then_grow():
 
 def test_kv_cache_extend_increases_max_seq_len():
     from tinyserve.static_kv_cache import StaticKVCache
-    cache = StaticKVCache(
-        max_seq_len=100, num_layers=2, num_kv_heads=4,
-        head_dim=32, device=torch.device("cpu")
-    )
+
+    cache = StaticKVCache(max_seq_len=100, num_layers=2, num_kv_heads=4, head_dim=32, device=torch.device("cpu"))
     assert cache.max_seq_len == 100
 
     cache.extend(50)
@@ -76,10 +74,8 @@ def test_kv_cache_extend_increases_max_seq_len():
 
 def test_kv_cache_extend_preserves_existing_key_value_data():
     from tinyserve.static_kv_cache import StaticKVCache
-    cache = StaticKVCache(
-        max_seq_len=100, num_layers=2, num_kv_heads=4,
-        head_dim=32, device=torch.device("cpu")
-    )
+
+    cache = StaticKVCache(max_seq_len=100, num_layers=2, num_kv_heads=4, head_dim=32, device=torch.device("cpu"))
     # Write some data
     k = torch.randn(1, 4, 10, 32)
     v = torch.randn(1, 4, 10, 32)
@@ -94,9 +90,9 @@ def test_kv_cache_extend_preserves_existing_key_value_data():
 
 def test_kv_cache_reports_correct_vram_byte_usage():
     from tinyserve.static_kv_cache import StaticKVCache
+
     cache = StaticKVCache(
-        max_seq_len=100, num_layers=2, num_kv_heads=4,
-        head_dim=32, device=torch.device("cpu"), dtype=torch.bfloat16
+        max_seq_len=100, num_layers=2, num_kv_heads=4, head_dim=32, device=torch.device("cpu"), dtype=torch.bfloat16
     )
     expected = 2 * 2 * 1 * 4 * 100 * 32 * 2  # K+V × layers × batch × heads × seq × dim × bf16
     assert cache.vram_bytes == expected
@@ -111,15 +107,13 @@ def test_vram_budget_shrinks_experts_when_kv_pressure_is_high():
     cache.flush_slot_updates()
 
     from tinyserve.static_kv_cache import StaticKVCache
-    kv = StaticKVCache(
-        max_seq_len=100, num_layers=2, num_kv_heads=4,
-        head_dim=32, device=torch.device("cpu")
-    )
+
+    kv = StaticKVCache(max_seq_len=100, num_layers=2, num_kv_heads=4, head_dim=32, device=torch.device("cpu"))
     # Simulate KV at 90% capacity
     for li in range(2):
         kv._seq_lens[li] = 90
 
-    budget = VRAMBudget(cache, kv, expert_bytes=64, kv_bytes_per_token=2*4*32*2*2)
+    budget = VRAMBudget(cache, kv, expert_bytes=64, kv_bytes_per_token=2 * 4 * 32 * 2 * 2)
     action = budget.check()
 
     assert action["should_rebalance"] is True
@@ -136,14 +130,12 @@ def test_vram_budget_takes_no_action_when_usage_is_balanced():
     cache.flush_slot_updates()
 
     from tinyserve.static_kv_cache import StaticKVCache
-    kv = StaticKVCache(
-        max_seq_len=100, num_layers=2, num_kv_heads=4,
-        head_dim=32, device=torch.device("cpu")
-    )
+
+    kv = StaticKVCache(max_seq_len=100, num_layers=2, num_kv_heads=4, head_dim=32, device=torch.device("cpu"))
     kv._seq_lens[0] = 30  # 30% used
     kv._seq_lens[1] = 30
 
-    budget = VRAMBudget(cache, kv, expert_bytes=64, kv_bytes_per_token=2*4*32*2*2)
+    budget = VRAMBudget(cache, kv, expert_bytes=64, kv_bytes_per_token=2 * 4 * 32 * 2 * 2)
     action = budget.check()
 
     assert action["should_rebalance"] is False
@@ -155,15 +147,12 @@ def test_vram_budget_grows_experts_when_kv_pressure_clears():
     cache = _make_cache(capacity=6)  # was shrunk from 10
 
     from tinyserve.static_kv_cache import StaticKVCache
-    kv = StaticKVCache(
-        max_seq_len=100, num_layers=2, num_kv_heads=4,
-        head_dim=32, device=torch.device("cpu")
-    )
+
+    kv = StaticKVCache(max_seq_len=100, num_layers=2, num_kv_heads=4, head_dim=32, device=torch.device("cpu"))
     kv._seq_lens[0] = 0  # empty after request completion
     kv._seq_lens[1] = 0
 
-    budget = VRAMBudget(cache, kv, expert_bytes=64, kv_bytes_per_token=2*4*32*2*2,
-                        max_expert_capacity=10)
+    budget = VRAMBudget(cache, kv, expert_bytes=64, kv_bytes_per_token=2 * 4 * 32 * 2 * 2, max_expert_capacity=10)
     action = budget.check()
 
     assert action["should_rebalance"] is True

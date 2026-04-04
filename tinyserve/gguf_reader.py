@@ -148,15 +148,17 @@ class GGUFReader:
             n_blocks = (n_elements + block_size - 1) // block_size
             nbytes = n_blocks * bytes_per_block
 
-            tensors.append(GGUFTensorInfo(
-                name=name,
-                shape=shape,
-                ggml_type=ggml_type,
-                ggml_type_name=type_name,
-                offset=offset,
-                nbytes=nbytes,
-                block_size=block_size,
-            ))
+            tensors.append(
+                GGUFTensorInfo(
+                    name=name,
+                    shape=shape,
+                    ggml_type=ggml_type,
+                    ggml_type_name=type_name,
+                    offset=offset,
+                    nbytes=nbytes,
+                    block_size=block_size,
+                )
+            )
         return tensors
 
     def get_tensor_data(self, info: GGUFTensorInfo) -> bytes:

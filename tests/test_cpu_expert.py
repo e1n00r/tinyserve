@@ -8,7 +8,6 @@ from tests.conftest import requires_cuda
 from tinyserve.cpu_expert import CPUExpertForward
 from tinyserve.expert_store import TensorLayout, _pack_tensors
 
-
 HIDDEN = 64
 INTERMEDIATE = 128
 
@@ -159,11 +158,14 @@ class TestTranspose:
         w_dn = torch.randn(HIDDEN, INTERMEDIATE)
 
         layout_t = _make_separate_layout(transposed=True)
-        packed = _pack(layout_t, {
-            "gate_proj": w_gate.t(),
-            "up_proj": w_up.t(),
-            "down_proj": w_dn.t(),
-        })
+        packed = _pack(
+            layout_t,
+            {
+                "gate_proj": w_gate.t(),
+                "up_proj": w_up.t(),
+                "down_proj": w_dn.t(),
+            },
+        )
 
         h = torch.randn(1, HIDDEN)
         fwd = CPUExpertForward(layout_t, act_fn=F.silu, num_threads=1)

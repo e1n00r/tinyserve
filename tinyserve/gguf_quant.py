@@ -83,9 +83,9 @@ def parse_q4k_blocks(data: bytes, shape: tuple[int, int]) -> np.ndarray:
     values = np.empty(n_elements, dtype=np.float32)
 
     for b in range(n_blocks):
-        block = data[b * 144:(b + 1) * 144]
+        block = data[b * 144 : (b + 1) * 144]
         vals, _, _ = parse_q4k_block(block)
-        values[b * 256:(b + 1) * 256] = vals
+        values[b * 256 : (b + 1) * 256] = vals
 
     return values.reshape(shape)
 

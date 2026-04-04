@@ -16,8 +16,8 @@ from typing import Any, NamedTuple
 
 import torch
 
-from .model_registry import profile_from_config
 from ._model_hooks import OffloadedModel
+from .model_registry import profile_from_config
 
 
 class AttentionBackend(str, Enum):
@@ -29,9 +29,10 @@ class AttentionBackend(str, Enum):
 
 
 class RoutingSpec(NamedTuple):
-    softmax_order: str   # "router_native" | "softmax_then_topk"
+    softmax_order: str  # "router_native" | "softmax_then_topk"
     returns_logits: bool  # whether router returns raw logits
-    router_attr: str     # attribute name on MoE block ("gate" | "router")
+    router_attr: str  # attribute name on MoE block ("gate" | "router")
+
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class TinyserveConfig:
     Pass to load_and_offload or offload_model instead of individual kwargs.
     All fields have sensible defaults — only override what you need.
     """
+
     cache_capacity: int = 0
     cache_policy: str = "lfru"
     cache_bias: float = 0.0
@@ -131,7 +133,9 @@ def _register_flex_attention() -> str:
 
         _compiled_flex = torch.compile(flex_attention)
 
-        def flex_attention_with_sinks(module, query, key, value, attention_mask, scaling, dropout=0.0, sliding_window=None, **_):
+        def flex_attention_with_sinks(
+            module, query, key, value, attention_mask, scaling, dropout=0.0, sliding_window=None, **_
+        ):
             N, H, L, E = query.shape
             _, G, S, _ = key.shape
 
@@ -162,9 +166,7 @@ def _register_flex_attention() -> str:
                     if sw is not None:
                         in_window = kv_idx >= (q_idx - sw)
                         is_valid = is_valid & in_window
-                    return torch.where(
-                        is_valid, score, torch.where(is_sink, sinks[h], float("-inf"))
-                    )
+                    return torch.where(is_valid, score, torch.where(is_sink, sinks[h], float("-inf")))
 
                 # Fix 3: Block mask for hardware-level block skipping.
                 def mask_mod(b, h, q_idx, kv_idx):
@@ -185,15 +187,15 @@ def _register_flex_attention() -> str:
                     is_sink = kv_idx == kv_len
                     if sw is not None:
                         in_window = kv_idx >= (q_idx - sw)
-                        return torch.where(
-                            is_sink, sinks[h], torch.where(in_window, score, float("-inf"))
-                        )
+                        return torch.where(is_sink, sinks[h], torch.where(in_window, score, float("-inf")))
                     return torch.where(is_sink, sinks[h], score)
 
                 block_mask = None
 
             out = _compiled_flex(
-                query, k_ext, v_ext,
+                query,
+                k_ext,
+                v_ext,
                 score_mod=score_mod,
                 block_mask=block_mask,
                 scale=scaling,
@@ -230,12 +232,18 @@ def _register_sdpa_attention() -> str:
                 # Decode: single query position
                 k_decode = key
                 v_decode = value
-                if sliding_window is not None and S > sliding_window:
+                if sliding_window is not None and sliding_window < S:
                     k_decode = key[:, :, -sliding_window:]
                     v_decode = value[:, :, -sliding_window:]
                 out = torch.nn.functional.scaled_dot_product_attention(
-                    query, k_decode, v_decode, attn_mask=None, dropout_p=0.0,
-                    is_causal=False, scale=scaling, enable_gqa=True,
+                    query,
+                    k_decode,
+                    v_decode,
+                    attn_mask=None,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    scale=scaling,
+                    enable_gqa=True,
                 )
             elif S > _HEAD_ATTENTION_SEQ_THRESHOLD or (L > 256 and S > _HEAD_PREFILL_KV_THRESHOLD):
                 # Long KV context: head-wise attention to avoid VRAM OOM.
@@ -243,15 +251,26 @@ def _register_sdpa_attention() -> str:
                 # KV are moderate. Processes one GQA group at a time — peak VRAM
                 # is O(chunk × head_dim) instead of O(chunk × num_heads × head_dim).
                 from .head_attention import head_wise_sdpa
+
                 return head_wise_sdpa(
-                    query, key, value, scaling,
-                    sliding_window=sliding_window, is_causal=True,
+                    query,
+                    key,
+                    value,
+                    scaling,
+                    sliding_window=sliding_window,
+                    is_causal=True,
                 )
             else:
                 # Short prefill: standard SDPA is faster
                 out = torch.nn.functional.scaled_dot_product_attention(
-                    query, key, value, attn_mask=None, dropout_p=0.0,
-                    is_causal=True, scale=scaling, enable_gqa=True,
+                    query,
+                    key,
+                    value,
+                    attn_mask=None,
+                    dropout_p=0.0,
+                    is_causal=True,
+                    scale=scaling,
+                    enable_gqa=True,
                 )
             return out.transpose(1, 2).contiguous(), None
 
@@ -272,8 +291,8 @@ def _register_sdpa_attention() -> str:
 def _register_flashinfer_attention() -> str:
     """Register FlashInfer attention backend. Near-optimal GQA decode kernels."""
     try:
-        import transformers
         import flashinfer
+        import transformers
 
         def flashinfer_attention_with_sinks(
             module, query, key, value, attention_mask, scaling, dropout=0.0, sliding_window=None, **_
@@ -286,13 +305,15 @@ def _register_flashinfer_attention() -> str:
                 k_nhd = key[0].permute(1, 0, 2).contiguous()
                 v_nhd = value[0].permute(1, 0, 2).contiguous()
 
-                if sliding_window is not None and S > sliding_window:
+                if sliding_window is not None and sliding_window < S:
                     k_nhd = k_nhd[-sliding_window:]
                     v_nhd = v_nhd[-sliding_window:]
 
                 out_2d = flashinfer.decode.single_decode_with_kv_cache(
-                    q_2d, k_nhd, v_nhd,
-                    kv_layout='NHD',
+                    q_2d,
+                    k_nhd,
+                    v_nhd,
+                    kv_layout="NHD",
                     sm_scale=scaling,
                 )
                 out = out_2d.unsqueeze(0).unsqueeze(0)
@@ -302,8 +323,10 @@ def _register_flashinfer_attention() -> str:
                 v_nhd = value[0].permute(1, 0, 2).contiguous()
 
                 out_nhd = flashinfer.prefill.single_prefill_with_kv_cache(
-                    q_nhd, k_nhd, v_nhd,
-                    kv_layout='NHD',
+                    q_nhd,
+                    k_nhd,
+                    v_nhd,
+                    kv_layout="NHD",
                     causal=True,
                     sm_scale=scaling,
                 )
@@ -332,10 +355,22 @@ def _apply_offload_config(offload_config: TinyserveConfig, locals_dict: dict) ->
     is only overridden when config provides a non-None value.
     """
     fields = [
-        "cache_capacity", "cache_policy", "cache_bias", "adaptive_fate",
-        "max_seq_len", "kv_dtype", "gpu_memory_utilization", "fp8",
-        "disk_offload", "ram_cache_gb", "kv_offload", "buddy_table_path",
-        "imatrix_path", "streaming", "streaming_sink_size", "streaming_window_size",
+        "cache_capacity",
+        "cache_policy",
+        "cache_bias",
+        "adaptive_fate",
+        "max_seq_len",
+        "kv_dtype",
+        "gpu_memory_utilization",
+        "fp8",
+        "disk_offload",
+        "ram_cache_gb",
+        "kv_offload",
+        "buddy_table_path",
+        "imatrix_path",
+        "streaming",
+        "streaming_sink_size",
+        "streaming_window_size",
     ]
     for f in fields:
         locals_dict[f] = getattr(offload_config, f)
@@ -442,9 +477,9 @@ def offload_model(
     spec = _ROUTING_MAP.get(model_type, _default_spec)
     if spec is _default_spec:
         logger.warning(
-            "Unknown model type %r — using default routing spec %s. "
-            "Add it to _ROUTING_MAP for optimal performance.",
-            model_type, _default_spec,
+            "Unknown model type %r — using default routing spec %s. Add it to _ROUTING_MAP for optimal performance.",
+            model_type,
+            _default_spec,
         )
     softmax_order, returns_logits, router_attr = spec
 
@@ -491,10 +526,14 @@ def offload_model(
     use_flex = attn_implementation == AttentionBackend.FLEX
     streaming = getattr(offload_config, "streaming", False) if offload_config is not None else False
     streaming_sink_size = getattr(offload_config, "streaming_sink_size", 4) if offload_config is not None else 4
-    streaming_window_size = getattr(offload_config, "streaming_window_size", 1024) if offload_config is not None else 1024
+    streaming_window_size = (
+        getattr(offload_config, "streaming_window_size", 1024) if offload_config is not None else 1024
+    )
     if max_seq_len > 0:
         storage_device = "cpu" if kv_offload else None
-        kv_cache = StaticKVCache.from_model_config(model_config, max_seq_len=max_seq_len, device=device, dtype=kv_dtype, storage_device=storage_device)
+        kv_cache = StaticKVCache.from_model_config(
+            model_config, max_seq_len=max_seq_len, device=device, dtype=kv_dtype, storage_device=storage_device
+        )
         if use_flex:
             kv_cache.static_shapes = True
         if streaming:
@@ -513,7 +552,9 @@ def offload_model(
                 "Expert cache auto-sized to 0 slots — insufficient free VRAM "
                 "(free=%.2f GB, reserved=%.2f GB, expert=%.2f MB). "
                 "All expert loads will be cache misses.",
-                free_vram / 1e9, reserved / 1e9, buf_bytes / 1e6,
+                free_vram / 1e9,
+                reserved / 1e9,
+                buf_bytes / 1e6,
             )
 
     cache = (
@@ -536,12 +577,15 @@ def offload_model(
         p.cache_bias = cache_bias
 
     from .vram_budget import VRAMBudget
+
     vram_budget = None
     if cache is not None and kv_cache is not None:
         kv_bpt = kv_cache.vram_bytes // max(1, kv_cache.max_seq_len)
         vram_budget = VRAMBudget(
-            expert_cache=cache, kv_cache=kv_cache,
-            expert_bytes=buf_bytes, kv_bytes_per_token=kv_bpt,
+            expert_cache=cache,
+            kv_cache=kv_cache,
+            expert_bytes=buf_bytes,
+            kv_bytes_per_token=kv_bpt,
             max_expert_capacity=cache_capacity,
         )
         kv_cache._vram_budget = vram_budget  # enables self-healing on overflow
@@ -549,7 +593,9 @@ def offload_model(
     # Seed cache from imatrix activation data (eliminates cold-start phase).
     if imatrix_path is not None and cache is not None:
         import os
+
         from .imatrix import parse_imatrix_dat, rank_experts_from_imatrix, seed_cache_from_ranking
+
         if not os.path.isfile(imatrix_path):
             raise FileNotFoundError(f"imatrix file not found: {imatrix_path}")
         counts = parse_imatrix_dat(imatrix_path)
@@ -561,7 +607,9 @@ def offload_model(
     if buddy_table_path is not None:
         import json
         import os
+
         from .buddy_experts import BuddyTable
+
         if not os.path.isfile(buddy_table_path):
             raise FileNotFoundError(f"Buddy table not found: {buddy_table_path}")
         with open(buddy_table_path) as f:

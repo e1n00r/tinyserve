@@ -20,7 +20,6 @@ import torch
 if TYPE_CHECKING:
     from .ram_cache import RAMCache
 
-from .cache_policy import make_policy
 from .expert_cache import ExpertCache as ExpertCache  # re-export for backward compat
 
 logger = logging.getLogger(__name__)
@@ -74,13 +73,13 @@ class TensorLayout:
         self.total_bytes = offset
 
     @staticmethod
-    def from_tensors(tensors: dict[str, torch.Tensor]) -> "TensorLayout":
+    def from_tensors(tensors: dict[str, torch.Tensor]) -> TensorLayout:
         return TensorLayout({name: (tensor.shape, tensor.dtype) for name, tensor in tensors.items()})
 
 
 def _pack_tensors(
     dest: torch.Tensor,
-    layout: "TensorLayout",
+    layout: TensorLayout,
     tensors: dict[str, torch.Tensor],
 ):
     """Pack a dict of tensors into a flat uint8 dest according to layout."""
@@ -98,7 +97,7 @@ class ExpertBuffer:
         self,
         layout: TensorLayout,
         device: torch.device,
-        fp8_layout: "TensorLayout | None" = None,
+        fp8_layout: TensorLayout | None = None,
     ):
         self.layout = layout
         self.packed = torch.empty(layout.total_bytes, dtype=torch.uint8, device=device)
@@ -116,7 +115,7 @@ class ExpertBuffer:
         return self.packed[offset : offset + nbytes].view(dtype).view(shape)
 
 
-def _fp8_layout(bf16_layout: "TensorLayout") -> "TensorLayout":
+def _fp8_layout(bf16_layout: TensorLayout) -> TensorLayout:
     """Return a layout where float tensors are stored as float8_e4m3fn (1 byte/elem)."""
     fp8_specs = {}
     for name, (shape, dtype) in bf16_layout.specs.items():
@@ -157,7 +156,7 @@ class ExpertStore:
         layout: TensorLayout,
         num_layers: int,
         num_experts: int,
-        bf16_layout: "TensorLayout | None" = None,
+        bf16_layout: TensorLayout | None = None,
     ):
         if not data.is_pinned():
             raise RuntimeError(
@@ -182,7 +181,7 @@ class ExpertStore:
         num_layers: int,
         num_experts: int,
         fp8: bool = False,
-    ) -> "ExpertStore":
+    ) -> ExpertStore:
         sample_key = next(iter(expert_weights))
         bf16_layout = TensorLayout.from_tensors(expert_weights[sample_key])
         store_layout = _fp8_layout(bf16_layout) if fp8 else bf16_layout
@@ -206,7 +205,7 @@ class ExpertStore:
         moe_block_attr: str,
         expert_list_attr: str,
         fp8: bool = False,
-    ) -> tuple["ExpertStore", int]:
+    ) -> tuple[ExpertStore, int]:
         import torch.nn as nn
 
         first_container = getattr(getattr(moe_layers[0][1], moe_block_attr), expert_list_attr)
@@ -284,7 +283,7 @@ class ExpertStore:
         layer_indices: list[int],
         disk_offload: bool = False,
         ram_cache_gb: float = 0,
-    ) -> "tuple[ExpertStore, int] | tuple[ExpertStore, int, RAMCache | None]":
+    ) -> tuple[ExpertStore, int] | tuple[ExpertStore, int, RAMCache | None]:
         """Load expert weights directly from safetensors, bypassing HF dequantization.
 
         For MXFP4 models where ``*_blocks`` / ``*_scales`` tensors exist in the
@@ -331,7 +330,9 @@ class ExpertStore:
             num_moe_layers = cached["num_layers"]
             num_experts = cached["num_experts"]
             pinned = torch.empty(
-                num_moe_layers, num_experts, layout.total_bytes,
+                num_moe_layers,
+                num_experts,
+                layout.total_bytes,
                 dtype=torch.uint8,
             ).pin_memory()
             pinned.copy_(cached["data"])
@@ -353,6 +354,7 @@ class ExpertStore:
         layer_tensors: dict[int, dict[str, torch.Tensor]] = {}
         try:
             from tqdm import tqdm
+
             shard_iter = tqdm(shard_files, desc="Loading expert shards", unit="shard")
         except ImportError:
             logger.debug("tqdm not available, loading shards without progress bar")
@@ -405,8 +407,12 @@ class ExpertStore:
         try:
             serialized_specs = _serialize_layout_specs(layout.specs)
             save_int4_cache(
-                cache_path, data, serialized_specs,
-                num_moe_layers, num_experts, model_hash_val,
+                cache_path,
+                data,
+                serialized_specs,
+                num_moe_layers,
+                num_experts,
+                model_hash_val,
             )
         except (OSError, RuntimeError):
             logger.warning("Expert cache save failed (non-fatal)", exc_info=True)
@@ -421,7 +427,9 @@ class ExpertStore:
             if total_expert_bytes < available_ram * 0.7:
                 # Experts fit in RAM — use single pinned buffer (no mmap overhead).
                 pinned = torch.empty(
-                    num_moe_layers, num_experts, layout.total_bytes,
+                    num_moe_layers,
+                    num_experts,
+                    layout.total_bytes,
                     dtype=torch.uint8,
                 )
                 if torch.cuda.is_available():
@@ -513,7 +521,7 @@ class ExpertStore:
     def _fp8(self) -> bool:
         return self._bf16_layout is not self.layout
 
-    def allocate_buffer(self, device: torch.device) -> "ExpertBuffer":
+    def allocate_buffer(self, device: torch.device) -> ExpertBuffer:
         fp8_layout = self.layout if self._fp8 else None
         return ExpertBuffer(self._bf16_layout, device, fp8_layout=fp8_layout)
 
@@ -523,7 +531,7 @@ class ExpertStore:
 
     def copy_to_buffer_slot(
         self,
-        cache: "ExpertCache",
+        cache: ExpertCache,
         slot: int,
         layer_idx: int,
         expert_idx: int,
@@ -543,7 +551,7 @@ class ExpertStore:
 
     def copy_to_buffer(
         self,
-        buf: "ExpertBuffer",
+        buf: ExpertBuffer,
         layer_idx: int,
         expert_idx: int,
         non_blocking: bool = False,
@@ -574,5 +582,3 @@ class ExpertStore:
                 dst.copy_(src.to(bf16_dtype))
             else:
                 dst.copy_(src.view(torch.uint8).view(bf16_shape))
-
-

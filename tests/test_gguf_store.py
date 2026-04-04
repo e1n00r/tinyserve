@@ -101,7 +101,7 @@ def _build_q4k_block(values_f32: np.ndarray) -> bytes:
             if (i * 32 + j) % 2 == 0:
                 qs[byte_idx] = q & 0x0F
             else:
-                qs[byte_idx] |= (q << 4)
+                qs[byte_idx] |= q << 4
 
     # Assemble block
     block = struct.pack("<e", d) + struct.pack("<e", dmin) + bytes(scales_bytes) + bytes(qs)
@@ -165,7 +165,7 @@ def _create_q4k_gguf(path, n_layers=1, n_experts=2, hidden=IN_FEATURES, intermed
                 n_blocks = n_elements // block_size
                 blocks_data = b""
                 for b_idx in range(n_blocks):
-                    block_vals = vals[b_idx * block_size:(b_idx + 1) * block_size]
+                    block_vals = vals[b_idx * block_size : (b_idx + 1) * block_size]
                     blocks_data += _build_q4k_block(block_vals)
                 tensor_data[(layer, expert, proj)] = (blocks_data, vals, shape)
 
@@ -275,8 +275,12 @@ class TestQ4KToINT4Pack:
         down_data = _make_q4k_tensor_bytes(down_shape)
 
         g_packed, g_sz, u_packed, u_sz, d_packed, d_sz = q4k_expert_to_int4pack(
-            gate_data, up_data, down_data,
-            gate_shape, up_shape, down_shape,
+            gate_data,
+            up_data,
+            down_data,
+            gate_shape,
+            up_shape,
+            down_shape,
             group_size=GROUP_SIZE,
         )
 
@@ -302,8 +306,12 @@ class TestQ4KToINT4Pack:
 
         # Get INT4 packed version (use gate slot, ignore up/down)
         g_packed, g_sz, _, _, _, _ = q4k_expert_to_int4pack(
-            data_bytes, data_bytes, data_bytes,
-            shape, shape, shape,
+            data_bytes,
+            data_bytes,
+            data_bytes,
+            shape,
+            shape,
+            shape,
             group_size=GROUP_SIZE,
         )
 
@@ -323,12 +331,8 @@ class TestQ4KToINT4Pack:
         shape = (OUT_FEATURES, IN_FEATURES)
         data = _make_q4k_tensor_bytes(shape)
 
-        _, sz1, _, _, _, _ = q4k_expert_to_int4pack(
-            data, data, data, shape, shape, shape, group_size=GROUP_SIZE
-        )
-        _, sz2, _, _, _, _ = q4k_expert_to_int4pack(
-            data, data, data, shape, shape, shape, group_size=GROUP_SIZE
-        )
+        _, sz1, _, _, _, _ = q4k_expert_to_int4pack(data, data, data, shape, shape, shape, group_size=GROUP_SIZE)
+        _, sz2, _, _, _, _ = q4k_expert_to_int4pack(data, data, data, shape, shape, shape, group_size=GROUP_SIZE)
         torch.testing.assert_close(sz1, sz2)
 
 

@@ -4,6 +4,7 @@ Based on BuddyMoE (arxiv 2511.10054): when a cache miss occurs, substitute
 a co-activation-similar cached expert for zero-stall inference. Small
 accuracy cost bounded by co-activation similarity.
 """
+
 import torch
 
 

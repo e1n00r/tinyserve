@@ -3,11 +3,10 @@
 from types import SimpleNamespace
 
 import torch
-import pytest
 
+from tests.conftest import requires_cuda
 from tinyserve.chunked import chunked_prefill, generate_chunked
 from tinyserve.static_kv_cache import StaticKVCache
-from tests.conftest import requires_cuda
 
 
 def _make_dummy_model(vocab_size=32, hidden=16, num_layers=2, num_kv_heads=2, head_dim=8):
@@ -164,7 +163,11 @@ def test_generate_chunked_produces_tokens():
     input_ids = torch.randint(0, 32, (1, 10))
 
     output = generate_chunked(
-        model, input_ids, max_new_tokens=5, kv_cache=cache, chunk_size=4,
+        model,
+        input_ids,
+        max_new_tokens=5,
+        kv_cache=cache,
+        chunk_size=4,
     )
 
     # Output should be input + generated tokens
@@ -179,6 +182,7 @@ def test_generate_chunked_eos_stops_early():
 
     class _EosModel(_DummyModel):
         """Produces eos_token_id=0 on the 3rd generated token."""
+
         def __init__(self):
             super().__init__()
             self._gen_count = 0
@@ -199,8 +203,12 @@ def test_generate_chunked_eos_stops_early():
     input_ids = torch.randint(1, 32, (1, 5))
 
     output = generate_chunked(
-        model, input_ids, max_new_tokens=20, kv_cache=cache,
-        chunk_size=3, eos_token_id=0,
+        model,
+        input_ids,
+        max_new_tokens=20,
+        kv_cache=cache,
+        chunk_size=3,
+        eos_token_id=0,
     )
 
     # 1st generated token comes from prefill logits (no decode call).
@@ -213,12 +221,15 @@ def test_generate_chunked_eos_stops_early():
 @requires_cuda
 def test_chunked_prefill_with_streaming_at_capacity():
     """Chunked prefill filling KV to capacity + streaming eviction doesn't crash."""
-    from tinyserve.static_kv_cache import StaticKVCache
     from tinyserve.chunked import chunked_prefill
+    from tinyserve.static_kv_cache import StaticKVCache
 
     cache = StaticKVCache(
-        max_seq_len=64, num_layers=2, num_kv_heads=1,
-        head_dim=4, device=torch.device("cuda"),
+        max_seq_len=64,
+        num_layers=2,
+        num_kv_heads=1,
+        head_dim=4,
+        device=torch.device("cuda"),
     )
     cache.enable_streaming(sink_size=4, window_size=28)  # max_kept=32
 
@@ -229,8 +240,10 @@ def test_chunked_prefill_with_streaming_at_capacity():
                 k = torch.randn(1, 1, seq, 4, device="cuda", dtype=torch.bfloat16)
                 v = torch.randn(1, 1, seq, 4, device="cuda", dtype=torch.bfloat16)
                 past_key_values.update(k, v, layer)
+
             class Out:
                 logits = torch.randn(1, seq, 10, device="cuda")
+
             return Out()
 
     # 128 tokens chunked at 32 — will fill and overflow KV, triggering eviction

@@ -13,24 +13,23 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .expert_store import ExpertBuffer, ExpertStore
 from .expert_cache import ExpertCache
-from .profiler import OffloadProfiler
-from .ram_cache import madvise_willneed
 from .expert_forward import (
-    _get_expert_loop,
-    _template_weight_storage,
-    swap_weights_and_forward,
-    _precompute_param_refs,
-    forward_from_packed,
+    _build_cpp_layout_args,
+    _build_gpu_int4_forward,
     _build_inline_forward,
     _build_mxfp4_inline_forward,
-    _build_gpu_int4_forward,
-    _build_cpp_layout_args,
+    _get_expert_loop,
+    _precompute_param_refs,
+    forward_from_packed,
+    swap_weights_and_forward,
 )
+from .expert_store import ExpertBuffer, ExpertStore
+from .profiler import OffloadProfiler
+from .ram_cache import madvise_willneed
 
 if TYPE_CHECKING:
-    from .expert_store import TensorLayout
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +44,12 @@ try:
 except ImportError:
     logger.debug("Cython group_tokens_by_expert not available, using Python fallback")
     _cython_group_by_expert = None
+
+try:
+    from tinyserve._fast_cache import forward_cache_hits as _cython_forward_hits
+except ImportError:
+    logger.debug("Cython forward_cache_hits not available, using Python fallback")
+    _cython_forward_hits = None
 
 
 class ExpertPipeline:
@@ -180,9 +185,7 @@ class ExpertPipeline:
                     if self._inline_fwd is not None:
                         out_batch = self._inline_fwd(packed, h_batch)
                     else:
-                        out_batch = forward_from_packed(
-                            self.template, packed, self._param_refs, h_batch
-                        )
+                        out_batch = forward_from_packed(self.template, packed, self._param_refs, h_batch)
 
             if out_batch is None:
                 buf = self.staging_buffer_a
@@ -207,7 +210,7 @@ class ExpertPipeline:
 
     def _classify_hits_misses(
         self,
-        cache: "ExpertCache",
+        cache: ExpertCache,
         layer_idx: int,
         expert_ids: torch.Tensor | list[int],
     ) -> tuple[list[tuple[int, int]], list[int], list[int]]:
@@ -240,11 +243,15 @@ class ExpertPipeline:
                     cache._policy.lookup((layer_idx, expert_ids_list[i]))
                     cache.hits += 1
                     cache._layer_hits[layer_idx] = cache._layer_hits.get(layer_idx, 0) + 1
-                    cache._expert_access_count[(layer_idx, expert_ids_list[i])] = cache._expert_access_count.get((layer_idx, expert_ids_list[i]), 0) + 1
+                    cache._expert_access_count[(layer_idx, expert_ids_list[i])] = (
+                        cache._expert_access_count.get((layer_idx, expert_ids_list[i]), 0) + 1
+                    )
                 for i in misses:
                     cache.misses += 1
                     cache._layer_misses[layer_idx] = cache._layer_misses.get(layer_idx, 0) + 1
-                    cache._expert_access_count[(layer_idx, expert_ids_list[i])] = cache._expert_access_count.get((layer_idx, expert_ids_list[i]), 0) + 1
+                    cache._expert_access_count[(layer_idx, expert_ids_list[i])] = (
+                        cache._expert_access_count.get((layer_idx, expert_ids_list[i]), 0) + 1
+                    )
             else:
                 for i, (eid, slot) in enumerate(zip(expert_ids_list, slots_list)):
                     if slot >= 0:
@@ -252,12 +259,16 @@ class ExpertPipeline:
                         cache._policy.lookup((layer_idx, eid))
                         cache.hits += 1
                         cache._layer_hits[layer_idx] = cache._layer_hits.get(layer_idx, 0) + 1
-                        cache._expert_access_count[(layer_idx, eid)] = cache._expert_access_count.get((layer_idx, eid), 0) + 1
+                        cache._expert_access_count[(layer_idx, eid)] = (
+                            cache._expert_access_count.get((layer_idx, eid), 0) + 1
+                        )
                     else:
                         misses.append(i)
                         cache.misses += 1
                         cache._layer_misses[layer_idx] = cache._layer_misses.get(layer_idx, 0) + 1
-                        cache._expert_access_count[(layer_idx, eid)] = cache._expert_access_count.get((layer_idx, eid), 0) + 1
+                        cache._expert_access_count[(layer_idx, eid)] = (
+                            cache._expert_access_count.get((layer_idx, eid), 0) + 1
+                        )
         else:
             if isinstance(expert_ids, torch.Tensor):
                 expert_ids = expert_ids.tolist()
@@ -281,18 +292,14 @@ class ExpertPipeline:
         output: torch.Tensor,
         tok_idx: int,
         weights: torch.Tensor,
-        cache: "ExpertCache",
-    ) -> bool:
-        """Process all cache hits. Returns True if C++ fast path was used."""
+        cache: ExpertCache,
+    ) -> None:
+        """Process all cache hits via C++, Cython, or Python fallback."""
         _prof = self.profiler
         _inline = self._inline_fwd
         _cpp = self._cpp_ext
 
-        if (
-            _cpp is not None
-            and hits
-            and not any(s in self._prefetch_events for _, s in hits)
-        ):
+        if _cpp is not None and hits and not any(s in self._prefetch_events for _, s in hits):
             _args = self._cpp_layout_args
             n_hits = len(hits)
             for _j, (_i, _s) in enumerate(hits):
@@ -327,7 +334,23 @@ class ExpertPipeline:
                 _args["activation"],
             )
             output[tok_idx] += out.squeeze(0)
-            return True
+            return
+
+        if _cython_forward_hits is not None and not (_prof and _prof.enabled):
+            _fallback = lambda p, h_: forward_from_packed(self.template, p, self._param_refs, h_)
+            _cython_forward_hits(
+                hits,
+                h,
+                output,
+                tok_idx,
+                weights,
+                cache._packed,
+                _inline,
+                _fallback,
+                self._prefetch_events,
+                torch.cuda.current_stream().wait_event,
+            )
+            return
 
         for i, slot in hits:
             with _prof.phase("hit_compute") if _prof else nullcontext():
@@ -340,7 +363,6 @@ class ExpertPipeline:
                 if out is None:
                     out = forward_from_packed(self.template, packed, self._param_refs, h)
                 output[tok_idx] += weights[i] * out.squeeze(0)
-        return False
 
     def _handle_miss_fallback(
         self,
@@ -351,7 +373,7 @@ class ExpertPipeline:
         layer_idx: int,
         expert_ids_list: list[int],
         weights: torch.Tensor,
-        cache: "ExpertCache",
+        cache: ExpertCache,
     ):
         """Fiddler CPU fallback: buddy substitution then CPU compute for each miss."""
         _prof = self.profiler
@@ -363,8 +385,9 @@ class ExpertPipeline:
             buddy_tbl = (self._buddy_tables or {}).get(layer_idx)
             if buddy_tbl is not None:
                 if cache._slot_map_cpu is not None and layer_idx < cache._slot_map_cpu.shape[0]:
-                    cached_experts = set(int(e) for e in range(cache._slot_map_cpu.shape[1])
-                                        if cache._slot_map_cpu[layer_idx, e] >= 0)
+                    cached_experts = set(
+                        int(e) for e in range(cache._slot_map_cpu.shape[1]) if cache._slot_map_cpu[layer_idx, e] >= 0
+                    )
                 else:
                     cached_experts = set()
                 buddy_eid = buddy_tbl.find_cached_buddy(eid, cached_experts)
@@ -385,7 +408,7 @@ class ExpertPipeline:
                 out = self.cpu_expert.forward(h, expert_packed)
             output[tok_idx] += weights[i] * out.squeeze(0)
             gpu_slot = cache.allocate(layer_idx, eid)
-            cache.get_packed(gpu_slot).copy_(expert_packed[:cache.expert_bytes], non_blocking=True)
+            cache.get_packed(gpu_slot).copy_(expert_packed[: cache.expert_bytes], non_blocking=True)
 
     def _handle_miss_gpu_pipeline(
         self,
@@ -396,7 +419,7 @@ class ExpertPipeline:
         layer_idx: int,
         expert_ids_list: list[int],
         weights: torch.Tensor,
-        cache: "ExpertCache",
+        cache: ExpertCache,
     ):
         """Double-buffered H2D pipeline for misses, with optional RAM-split routing."""
         if self.cpu_expert is not None and self.ram_cache is not None and h.shape[0] == 1:
@@ -415,7 +438,9 @@ class ExpertPipeline:
                     output[tok_idx] += weights[i] * out.squeeze(0)
                     if cache is not None:
                         gpu_slot = cache.allocate(layer_idx, eid)
-                        cache.get_packed(gpu_slot).copy_(ram.get_slot_data(ram.lookup(layer_idx, eid)), non_blocking=True)
+                        cache.get_packed(gpu_slot).copy_(
+                            ram.get_slot_data(ram.lookup(layer_idx, eid)), non_blocking=True
+                        )
             if not cold_misses:
                 return
             misses = cold_misses
@@ -446,11 +471,18 @@ class ExpertPipeline:
         cache = self.cache
         hits, misses, expert_ids_list = self._classify_hits_misses(cache, layer_idx, expert_ids)
 
-        cpp_used = self._forward_cache_hits(hits, h, output, tok_idx, weights, cache)
-        if cpp_used or not misses:
+        self._forward_cache_hits(hits, h, output, tok_idx, weights, cache)
+        if not misses:
             if hasattr(cache, "flush_slot_updates"):
                 cache.flush_slot_updates()
             return
+
+        # Sync: hit accumulation ran on default stream, miss pipeline uses
+        # compute_stream. Both write output[tok_idx] — must serialize.
+        if hits:
+            _hit_done = torch.cuda.Event()
+            _hit_done.record()
+            self.compute_stream.wait_event(_hit_done)
 
         if self.cpu_on_miss and self.cpu_expert is not None and h.shape[0] == 1:
             self._handle_miss_fallback(misses, h, output, tok_idx, layer_idx, expert_ids_list, weights, cache)
@@ -542,9 +574,9 @@ class ExpertPipeline:
 
     def execute_batched_experts(
         self,
-        items: "list[BatchItem]",
+        items: list[BatchItem],
         layer_idx: int,
-    ) -> "list[torch.Tensor]":
+    ) -> list[torch.Tensor]:
         """Execute expert forwards for multiple requests with expert-level batching.
 
         Delegates to ExpertBatcher for grouping by expert_id, loading once,
@@ -555,7 +587,7 @@ class ExpertPipeline:
         batcher = ExpertBatcher(self)
         return batcher.batch_execute(items, layer_idx)
 
-    def schedule_prefetch(self, layer_idx: int, expert_ids: "list[int] | torch.Tensor") -> None:
+    def schedule_prefetch(self, layer_idx: int, expert_ids: list[int] | torch.Tensor) -> None:
         """Pre-load predicted experts into the VRAM cache for the next token.
 
         Uses temporal locality: the same experts are likely active next token.

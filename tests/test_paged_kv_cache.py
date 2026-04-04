@@ -1,8 +1,9 @@
 """Tests for PagedKVPool and PagedRequestKVCache."""
 
-import torch
 import pytest
-from tinyserve.paged_kv_cache import PagedKVPool, PagedRequestKVCache, PAGE_SIZE
+import torch
+
+from tinyserve.paged_kv_cache import PAGE_SIZE, PagedKVPool, PagedRequestKVCache
 
 DEVICE = torch.device("cpu")
 NUM_LAYERS = 2
@@ -57,8 +58,7 @@ def test_multi_page_sequence():
     k = torch.randn(1, NUM_KV_HEADS, total_tokens, HEAD_DIM, dtype=torch.bfloat16)
     v = torch.randn(1, NUM_KV_HEADS, total_tokens, HEAD_DIM, dtype=torch.bfloat16)
 
-    k_out, v_out = cache.update(k, v, layer_idx=0,
-                                 cache_kwargs={"cache_position": torch.arange(total_tokens)})
+    k_out, v_out = cache.update(k, v, layer_idx=0, cache_kwargs={"cache_position": torch.arange(total_tokens)})
 
     assert cache.seq_len == total_tokens
     assert len(cache.page_ids) == 2

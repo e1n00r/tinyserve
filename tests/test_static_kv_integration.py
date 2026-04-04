@@ -4,9 +4,7 @@ These tests use small synthetic models (Mixtral config) to validate
 KV cache correctness without loading GPT-OSS-20B.
 """
 
-import asyncio
 
-import pytest
 import torch
 
 from tests.conftest import requires_cuda
@@ -22,10 +20,16 @@ def test_static_kv_cache_forward_pass():
 
     torch.manual_seed(42)
     config = MixtralConfig(
-        vocab_size=256, hidden_size=64, intermediate_size=128,
-        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
-        num_local_experts=4, num_experts_per_tok=2,
-        max_position_embeddings=64, sliding_window=32,
+        vocab_size=256,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=64,
+        sliding_window=32,
     )
     model = MixtralForCausalLM(config).to(torch.bfloat16).eval()
     device = torch.device("cuda")
@@ -58,10 +62,16 @@ def test_static_kv_cache_with_offload_model():
 
     torch.manual_seed(42)
     config = MixtralConfig(
-        vocab_size=256, hidden_size=64, intermediate_size=128,
-        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
-        num_local_experts=4, num_experts_per_tok=2,
-        max_position_embeddings=64, sliding_window=32,
+        vocab_size=256,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=64,
+        sliding_window=32,
     )
     model = MixtralForCausalLM(config).to(torch.bfloat16).eval()
 
@@ -75,7 +85,10 @@ def test_static_kv_cache_with_offload_model():
     input_ids = torch.tensor([[1, 42, 100]], device="cuda")
     with torch.no_grad():
         out = offloaded.generate(
-            input_ids, max_new_tokens=5, do_sample=False, past_key_values=kv,
+            input_ids,
+            max_new_tokens=5,
+            do_sample=False,
+            past_key_values=kv,
         )
     assert out.shape[1] == input_ids.shape[1] + 5
 
@@ -89,16 +102,25 @@ def test_fp8_kv_cache_with_offload():
 
     torch.manual_seed(42)
     config = MixtralConfig(
-        vocab_size=256, hidden_size=64, intermediate_size=128,
-        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
-        num_local_experts=4, num_experts_per_tok=2,
-        max_position_embeddings=64, sliding_window=32,
+        vocab_size=256,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        max_position_embeddings=64,
+        sliding_window=32,
     )
     model = MixtralForCausalLM(config).to(torch.bfloat16).eval()
 
     offloaded = offload_model(
-        model, device="cuda", cache_capacity=16,
-        max_seq_len=32, kv_dtype=torch.float8_e4m3fn,
+        model,
+        device="cuda",
+        cache_capacity=16,
+        max_seq_len=32,
+        kv_dtype=torch.float8_e4m3fn,
     )
     kv = offloaded._kv_cache
     assert kv._dtype == torch.float8_e4m3fn
@@ -106,15 +128,20 @@ def test_fp8_kv_cache_with_offload():
     input_ids = torch.tensor([[1, 42, 100]], device="cuda")
     with torch.no_grad():
         out = offloaded.generate(
-            input_ids, max_new_tokens=5, do_sample=False, past_key_values=kv,
+            input_ids,
+            max_new_tokens=5,
+            do_sample=False,
+            past_key_values=kv,
         )
     assert out.shape[1] == input_ids.shape[1] + 5
 
 
 def test_gpu_memory_utilization_parameter():
     """gpu_memory_utilization parameter is accepted by offload_model."""
-    from tinyserve.offload import offload_model
     import inspect
+
+    from tinyserve.offload import offload_model
+
     sig = inspect.signature(offload_model)
     assert "gpu_memory_utilization" in sig.parameters
     assert sig.parameters["gpu_memory_utilization"].default == 0.90
@@ -126,7 +153,6 @@ def test_inference_engine_basic():
     from unittest.mock import MagicMock
 
     from tinyserve.server import InferenceEngine
-    from tinyserve.static_kv_cache import StaticKVCache
 
     # Mock model and tokenizer for CPU test
     model = MagicMock()

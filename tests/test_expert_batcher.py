@@ -25,11 +25,9 @@ class TinyFusedExpert(nn.Module):
         return nn.functional.linear(gated, self.down_proj)
 
 
-def _build_store_and_pipeline(
-    num_layers=1, num_experts=4, hidden=16, intermediate=32, device="cpu"
-):
+def _build_store_and_pipeline(num_layers=1, num_experts=4, hidden=16, intermediate=32, device="cpu"):
     """Build a ExpertStore + ExpertPipeline on CPU for testing."""
-    from tinyserve.expert_store import ExpertStore, TensorLayout
+    from tinyserve.expert_store import ExpertStore
 
     expert_weights = {}
     for li in range(num_layers):
@@ -63,7 +61,7 @@ def test_single_request_matches_unbatched():
     """Single request through ExpertBatcher matches pipeline.execute_layer_experts."""
     from tinyserve.expert_batcher import BatchItem, ExpertBatcher
     from tinyserve.expert_pipeline import ExpertPipeline
-    from tinyserve.expert_store import ExpertStore, ExpertCache
+    from tinyserve.expert_store import ExpertCache
 
     hidden, intermediate = 16, 32
     num_experts = 4
@@ -283,9 +281,8 @@ def test_cache_hit_batched():
 @requires_cuda
 def test_empty_requests():
     """Empty request list returns empty output list."""
-    from tinyserve.expert_batcher import BatchItem, ExpertBatcher
+    from tinyserve.expert_batcher import ExpertBatcher
     from tinyserve.expert_pipeline import ExpertPipeline
-    from tinyserve.expert_store import ExpertCache
 
     hidden, intermediate = 16, 32
     num_experts = 4

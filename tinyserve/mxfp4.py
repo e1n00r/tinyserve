@@ -51,4 +51,3 @@ def dequant_mxfp4(
 ) -> torch.Tensor:
     """Dequantize MXFP4, returning [in_features, out_features] (transposed for F.linear)."""
     return dequant_mxfp4_no_transpose(blocks, scales, dtype).T.contiguous()
-

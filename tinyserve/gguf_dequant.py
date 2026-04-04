@@ -57,10 +57,10 @@ def _dequant_tensor(
         n_blocks = n_elements // 32
         values = np.empty(n_elements, dtype=np.float32)
         for b in range(n_blocks):
-            block = raw[b * 34:(b + 1) * 34]
+            block = raw[b * 34 : (b + 1) * 34]
             scale = np.frombuffer(block[:2], dtype=np.float16).astype(np.float32)[0]
             quants = np.frombuffer(block[2:34], dtype=np.int8).astype(np.float32)
-            values[b * 32:(b + 1) * 32] = scale * quants
+            values[b * 32 : (b + 1) * 32] = scale * quants
         t = torch.from_numpy(values.reshape(info.shape))
         return t.to(torch.bfloat16).to(device)
 
@@ -71,7 +71,7 @@ def _dequant_tensor(
         n_blocks = n_elements // 256
         values = np.empty(n_elements, dtype=np.float32)
         for b in range(n_blocks):
-            block = raw[b * 210:(b + 1) * 210]
+            block = raw[b * 210 : (b + 1) * 210]
             # Q6_K layout: ql[128] + qh[64] + scales[16] + d(float16)
             ql = np.frombuffer(block[:128], dtype=np.uint8)
             qh = np.frombuffer(block[128:192], dtype=np.uint8)
@@ -132,9 +132,9 @@ def _dequant_fused_tensor(
         n_blocks = n_elements // 256
         values = np.empty(n_elements, dtype=np.float32)
         for b in range(n_blocks):
-            block = raw[b * 144:(b + 1) * 144]
+            block = raw[b * 144 : (b + 1) * 144]
             vals, _, _ = parse_q4k_block(block)
-            values[b * 256:(b + 1) * 256] = vals
+            values[b * 256 : (b + 1) * 256] = vals
         t = torch.from_numpy(values.reshape(shape_3d))
         return t.to(torch.bfloat16).to(device)
 
@@ -142,10 +142,10 @@ def _dequant_fused_tensor(
         n_blocks = n_elements // 32
         values = np.empty(n_elements, dtype=np.float32)
         for b in range(n_blocks):
-            block = raw[b * 34:(b + 1) * 34]
+            block = raw[b * 34 : (b + 1) * 34]
             scale = np.frombuffer(block[:2], dtype=np.float16).astype(np.float32)[0]
             quants = np.frombuffer(block[2:34], dtype=np.int8).astype(np.float32)
-            values[b * 32:(b + 1) * 32] = scale * quants
+            values[b * 32 : (b + 1) * 32] = scale * quants
         t = torch.from_numpy(values.reshape(shape_3d))
         return t.to(torch.bfloat16).to(device)
 

@@ -42,7 +42,7 @@ def head_wise_sdpa(
     device = query.device
 
     # Apply sliding window to key/value
-    if sliding_window is not None and S > sliding_window:
+    if sliding_window is not None and sliding_window < S:
         key = key[:, :, -sliding_window:]
         value = value[:, :, -sliding_window:]
         S = key.shape[2]
@@ -52,8 +52,8 @@ def head_wise_sdpa(
     # Process one KV head (GQA group) at a time
     for g in range(G):
         # Transfer one head's KV to GPU
-        k_head = key[:, g:g+1, :, :].to(device=device, non_blocking=True)
-        v_head = value[:, g:g+1, :, :].to(device=device, non_blocking=True)
+        k_head = key[:, g : g + 1, :, :].to(device=device, non_blocking=True)
+        v_head = value[:, g : g + 1, :, :].to(device=device, non_blocking=True)
 
         # Get the query heads for this GQA group
         q_start = g * heads_per_group
@@ -66,9 +66,13 @@ def head_wise_sdpa(
 
         # SDPA for this group
         out_group = F.scaled_dot_product_attention(
-            q_group, k_expanded, v_expanded,
-            attn_mask=None, dropout_p=0.0,
-            is_causal=is_causal, scale=scaling,
+            q_group,
+            k_expanded,
+            v_expanded,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=is_causal,
+            scale=scaling,
         )
         output[:, q_start:q_end, :, :] = out_group
 

@@ -4,8 +4,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from tests.conftest import requires_cuda
-from tinyserve.cpu_expert import HAS_INT4_CPU, mxfp4_to_int4pack
+from tinyserve.cpu_expert import HAS_INT4_CPU
 from tinyserve.expert_store import TensorLayout, _pack_tensors
 from tinyserve.mxfp4 import dequant_mxfp4_no_transpose
 
@@ -15,9 +14,7 @@ HAS_INT4_GPU = (
     and torch.cuda.is_available()
 )
 
-requires_gpu_int4 = pytest.mark.skipif(
-    not HAS_INT4_GPU, reason="GPU INT4 ops or CUDA not available"
-)
+requires_gpu_int4 = pytest.mark.skipif(not HAS_INT4_GPU, reason="GPU INT4 ops or CUDA not available")
 
 OUT_FEATURES = 64
 IN_FEATURES = 128
@@ -85,12 +82,15 @@ class TestGPUINT4Forward:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        })
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        )
 
         h = torch.randn(1, IN_FEATURES, dtype=torch.bfloat16, device="cuda")
         fwd = GPUINT4Forward(layout, group_size=GROUP_SIZE, act_fn=F.silu)
@@ -108,12 +108,15 @@ class TestGPUINT4Forward:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        })
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        )
 
         h = torch.randn(1, IN_FEATURES, dtype=torch.bfloat16, device="cuda")
         fwd = GPUINT4Forward(layout, group_size=GROUP_SIZE, act_fn=F.silu)
@@ -130,12 +133,15 @@ class TestGPUINT4Forward:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        })
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        )
 
         h = torch.randn(1, IN_FEATURES, dtype=torch.bfloat16, device="cuda")
         fwd = GPUINT4Forward(layout, group_size=GROUP_SIZE, act_fn=None)
@@ -159,12 +165,15 @@ class TestGPUINT4MatchesCPU:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        })
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        )
 
         h = torch.randn(1, IN_FEATURES, dtype=torch.bfloat16)
 
@@ -188,12 +197,15 @@ class TestGPUINT4MatchesCPU:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        })
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        )
 
         h = torch.randn(1, IN_FEATURES, dtype=torch.bfloat16)
 
@@ -224,12 +236,15 @@ class TestGPUINT4ConversionCache:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        }).cuda()
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        ).cuda()
 
         h = torch.randn(1, IN_FEATURES, dtype=torch.bfloat16, device="cuda")
         fwd = GPUINT4Forward(layout, group_size=GROUP_SIZE, act_fn=F.silu)
@@ -248,12 +263,15 @@ class TestGPUINT4ConversionCache:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        }).cuda()
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        ).cuda()
 
         h = torch.randn(1, IN_FEATURES, dtype=torch.bfloat16, device="cuda")
         fwd = GPUINT4Forward(layout, group_size=GROUP_SIZE, act_fn=F.silu)
@@ -266,6 +284,7 @@ class TestGPUINT4ConversionCache:
 class TestGPUINT4Availability:
     def test_has_int4_gpu_flag(self):
         from tinyserve.gpu_int4 import HAS_INT4_GPU as flag
+
         # Should be True on CUDA machines with modern PyTorch
         if torch.cuda.is_available():
             assert flag is True
@@ -273,7 +292,8 @@ class TestGPUINT4Availability:
     @requires_gpu_int4
     def test_graceful_import(self):
         """Module should import cleanly even when testing availability."""
-        from tinyserve.gpu_int4 import GPUINT4Forward, HAS_INT4_GPU, mxfp4_to_int4pack_gpu
+        from tinyserve.gpu_int4 import HAS_INT4_GPU
+
         assert HAS_INT4_GPU is True
 
 
@@ -281,15 +301,16 @@ class TestGPUINT4PipelineIntegration:
     @requires_gpu_int4
     def test_pipeline_uses_gpu_int4_for_mxfp4(self):
         """ExpertPipeline should use GPU INT4 forward for MXFP4 layouts."""
-        from tinyserve.gpu_int4 import GPUINT4Forward
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
         # _build_inline_forward returns None for MXFP4
         from tinyserve.expert_pipeline import _build_inline_forward
+
         assert _build_inline_forward(layout, F.silu) is None
 
         # _build_gpu_int4_forward should return a GPUINT4Forward-based callable
         from tinyserve.expert_pipeline import _build_gpu_int4_forward
+
         gpu_fwd = _build_gpu_int4_forward(layout, F.silu)
         assert gpu_fwd is not None
 
@@ -303,12 +324,15 @@ class TestGPUINT4PipelineIntegration:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        }).cuda()
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        ).cuda()
 
         gpu_fwd = _build_gpu_int4_forward(layout, F.silu)
         h = torch.randn(1, IN_FEATURES, dtype=torch.bfloat16, device="cuda")

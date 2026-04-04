@@ -23,8 +23,7 @@ HAS_INT4_GPU = (
 
 # MXFP4 nibble look-up table: index [0..15] -> float value
 _FP4_LUT = torch.tensor(
-    [+0.0, +0.5, +1.0, +1.5, +2.0, +3.0, +4.0, +6.0,
-     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    [+0.0, +0.5, +1.0, +1.5, +2.0, +3.0, +4.0, +6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=torch.float32,
 )
 
@@ -108,30 +107,26 @@ class GPUINT4Forward:
         gu_off = layout.offsets["gate_up_proj"]
         gu_sz = layout.sizes["gate_up_proj"]
         gu_shape = layout.specs["gate_up_proj"][0]
-        gu_blocks = expert_packed[gu_off:gu_off + gu_sz].view(torch.uint8).view(gu_shape)
+        gu_blocks = expert_packed[gu_off : gu_off + gu_sz].view(torch.uint8).view(gu_shape)
 
         gus_off = layout.offsets["gate_up_proj_scales"]
         gus_sz = layout.sizes["gate_up_proj_scales"]
         gus_shape = layout.specs["gate_up_proj_scales"][0]
-        gu_scales = expert_packed[gus_off:gus_off + gus_sz].view(torch.uint8).view(gus_shape)
+        gu_scales = expert_packed[gus_off : gus_off + gus_sz].view(torch.uint8).view(gus_shape)
 
         dn_off = layout.offsets["down_proj"]
         dn_sz = layout.sizes["down_proj"]
         dn_shape = layout.specs["down_proj"][0]
-        dn_blocks = expert_packed[dn_off:dn_off + dn_sz].view(torch.uint8).view(dn_shape)
+        dn_blocks = expert_packed[dn_off : dn_off + dn_sz].view(torch.uint8).view(dn_shape)
 
         dns_off = layout.offsets["down_proj_scales"]
         dns_sz = layout.sizes["down_proj_scales"]
         dns_shape = layout.specs["down_proj_scales"][0]
-        dn_scales = expert_packed[dns_off:dns_off + dns_sz].view(torch.uint8).view(dns_shape)
+        dn_scales = expert_packed[dns_off : dns_off + dns_sz].view(torch.uint8).view(dns_shape)
 
         # Move to CPU for dequant, then pack for GPU
-        gu_packed, gu_sz_tensor = mxfp4_to_int4pack_gpu(
-            gu_blocks.cpu(), gu_scales.cpu(), self.group_size, device
-        )
-        dn_packed, dn_sz_tensor = mxfp4_to_int4pack_gpu(
-            dn_blocks.cpu(), dn_scales.cpu(), self.group_size, device
-        )
+        gu_packed, gu_sz_tensor = mxfp4_to_int4pack_gpu(gu_blocks.cpu(), gu_scales.cpu(), self.group_size, device)
+        dn_packed, dn_sz_tensor = mxfp4_to_int4pack_gpu(dn_blocks.cpu(), dn_scales.cpu(), self.group_size, device)
 
         return gu_packed, gu_sz_tensor, dn_packed, dn_sz_tensor
 

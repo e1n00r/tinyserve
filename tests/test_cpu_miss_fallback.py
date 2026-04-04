@@ -1,8 +1,8 @@
 """Tests for CPU expert compute on cache miss."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import pytest
 
 from tests.conftest import requires_cuda
 
@@ -24,9 +24,9 @@ class TinyExpert(nn.Module):
 
 
 def _make_pipeline_with_cpu(num_experts=4, hidden=16, intermediate=32):
-    from tinyserve.expert_store import ExpertStore, ExpertCache
-    from tinyserve.expert_pipeline import ExpertPipeline
     from tinyserve.cpu_expert import CPUExpertForward
+    from tinyserve.expert_pipeline import ExpertPipeline
+    from tinyserve.expert_store import ExpertCache, ExpertStore
 
     weights = {}
     for li in range(1):
@@ -43,11 +43,9 @@ def _make_pipeline_with_cpu(num_experts=4, hidden=16, intermediate=32):
     ts = torch.cuda.Stream(device)
     cs = torch.cuda.Stream(device)
     # Small cache: capacity=2 forces misses with 4 experts
-    cache = ExpertCache(2, store.buffer_expert_bytes, device,
-                            num_layers=1, num_experts=num_experts)
+    cache = ExpertCache(2, store.buffer_expert_bytes, device, num_layers=1, num_experts=num_experts)
     cpu_fwd = CPUExpertForward(store.layout, act_fn=nn.SiLU())
-    pipeline = ExpertPipeline(store, template, device,
-                                     staging_buffer_a, staging_buffer_b, ts, cs, cache=cache)
+    pipeline = ExpertPipeline(store, template, device, staging_buffer_a, staging_buffer_b, ts, cs, cache=cache)
     pipeline.cpu_expert = cpu_fwd
     pipeline.cpu_on_miss = True
     return pipeline, store
@@ -62,8 +60,9 @@ def test_cache_miss_computes_on_cpu_and_returns_nonzero_output():
     weights = torch.tensor([[0.6, 0.4]], device="cuda", dtype=torch.bfloat16)
 
     # Fill cache with experts 2,3 so experts 0,1 are misses
-    pipeline.execute_layer_experts(h, 0, torch.tensor([[2, 3]], device="cuda"),
-                                   torch.tensor([[0.5, 0.5]], device="cuda", dtype=torch.bfloat16))
+    pipeline.execute_layer_experts(
+        h, 0, torch.tensor([[2, 3]], device="cuda"), torch.tensor([[0.5, 0.5]], device="cuda", dtype=torch.bfloat16)
+    )
 
     # Now request 0,1 — should miss and use CPU compute
     pipeline.cache.reset_stats()

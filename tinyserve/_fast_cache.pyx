@@ -83,3 +83,49 @@ def group_tokens_by_expert(list eid_list, int seq_len, int top_k):
             group.append((tok, k))
 
     return groups
+
+
+def forward_cache_hits(
+    list hits,
+    object h,
+    object output,
+    int tok_idx,
+    object weights,
+    object cache_packed,
+    object inline_fwd,
+    object fallback_fwd,
+    dict prefetch_events,
+    object cuda_wait_event,
+):
+    """Typed loop over cache hits: forward + weighted accumulate.
+
+    Args:
+        hits: list of (position_idx, cache_slot) tuples
+        h: [1, hidden_dim] hidden state tensor for this token
+        output: [seq_len, hidden_dim] accumulator tensor
+        tok_idx: which token row to accumulate into
+        weights: [top_k] routing weights tensor
+        cache_packed: cache._packed tensor [capacity, expert_bytes]
+        inline_fwd: callable(packed, h) -> out, or None
+        fallback_fwd: callable(packed, h) -> out (forward_from_packed)
+        prefetch_events: dict {slot: cuda_event}, mutated in-place
+        cuda_wait_event: bound method torch.cuda.current_stream().wait_event
+    """
+    cdef int i, slot, j
+    cdef int n_hits = len(hits)
+
+    for j in range(n_hits):
+        i = hits[j][0]
+        slot = hits[j][1]
+
+        if slot in prefetch_events:
+            cuda_wait_event(prefetch_events.pop(slot))
+
+        packed = cache_packed[slot]
+        if inline_fwd is not None:
+            out = inline_fwd(packed, h)
+        else:
+            out = None
+        if out is None:
+            out = fallback_fwd(packed, h)
+        output[tok_idx] += weights[i] * out.squeeze(0)

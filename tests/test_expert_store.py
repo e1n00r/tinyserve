@@ -133,7 +133,7 @@ def test_expert_byte_size_derived_from_actual_weight_shapes():
 @requires_cuda
 def test_cache_allocate_and_lookup_returns_correct_slot():
     """LRU cache works with generic store's buffer format."""
-    from tinyserve.expert_store import ExpertStore, ExpertCache
+    from tinyserve.expert_store import ExpertCache, ExpertStore
 
     expert_weights = {}
     for ei in range(4):

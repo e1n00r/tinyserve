@@ -222,6 +222,7 @@ class LFRUPolicy(CachePolicy):
     def select_evict(self) -> tuple[tuple, int]:
         try:
             from tinyserve._fast_cache import lfru_select_evict
+
             return lfru_select_evict(self._data, self._clock)
         except ImportError:
             logger.debug("Cython lfru_select_evict not available, using Python fallback")

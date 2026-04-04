@@ -78,7 +78,7 @@ def swap_weights_and_forward(
 
 def _precompute_param_refs(
     template: nn.Module,
-    layout: "TensorLayout",
+    layout: TensorLayout,
 ) -> list[tuple[nn.Parameter, int, int, tuple[int, ...], torch.dtype]]:
     """Precompute parameter references + offsets to avoid repeated string ops."""
     refs = []
@@ -220,26 +220,27 @@ def _build_mxfp4_inline_forward(layout, act_fn):
     from ._model_hooks import _mxfp4_linear
 
     if act_fn is not None:
+
         def _forward(packed, h):
-            w_gu = packed[gu_off:gu_off + gu_sz].view(torch.uint8).view(gu_shape)
-            s_gu = packed[gs_off:gs_off + gs_sz].view(torch.uint8).view(gs_shape)
+            w_gu = packed[gu_off : gu_off + gu_sz].view(torch.uint8).view(gu_shape)
+            s_gu = packed[gs_off : gs_off + gs_sz].view(torch.uint8).view(gs_shape)
             gate_up = _mxfp4_linear(h, w_gu, s_gu)
             gate, up = gate_up.chunk(2, dim=-1)
             gated = act_fn(gate) * up
-            w_dn = packed[dn_off:dn_off + dn_sz].view(torch.uint8).view(dn_shape)
-            s_dn = packed[ds_off:ds_off + ds_sz].view(torch.uint8).view(ds_shape)
+            w_dn = packed[dn_off : dn_off + dn_sz].view(torch.uint8).view(dn_shape)
+            s_dn = packed[ds_off : ds_off + ds_sz].view(torch.uint8).view(ds_shape)
             return _mxfp4_linear(gated, w_dn, s_dn)
     else:
         # GPT-OSS custom SwiGLU (interleaved, not chunked)
         def _forward(packed, h):
-            w_gu = packed[gu_off:gu_off + gu_sz].view(torch.uint8).view(gu_shape)
-            s_gu = packed[gs_off:gs_off + gs_sz].view(torch.uint8).view(gs_shape)
+            w_gu = packed[gu_off : gu_off + gu_sz].view(torch.uint8).view(gu_shape)
+            s_gu = packed[gs_off : gs_off + gs_sz].view(torch.uint8).view(gs_shape)
             gate_up = _mxfp4_linear(h, w_gu, s_gu)
             gate = gate_up[..., ::2].clamp(max=7.0)
             up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
             gated = (up + 1) * gate * torch.sigmoid(gate * _QUICK_GELU_COEFF)
-            w_dn = packed[dn_off:dn_off + dn_sz].view(torch.uint8).view(dn_shape)
-            s_dn = packed[ds_off:ds_off + ds_sz].view(torch.uint8).view(ds_shape)
+            w_dn = packed[dn_off : dn_off + dn_sz].view(torch.uint8).view(dn_shape)
+            s_dn = packed[ds_off : ds_off + ds_sz].view(torch.uint8).view(ds_shape)
             return _mxfp4_linear(gated, w_dn, s_dn)
 
     return _forward

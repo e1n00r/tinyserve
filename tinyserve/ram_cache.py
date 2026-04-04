@@ -140,7 +140,10 @@ class RAMCache:
             self._lru[key] = slot
             if self._fast_reader is not None:
                 future = self._executor.submit(
-                    self._fast_reader.read_expert, layer_idx, expert_idx, self._pool[slot],
+                    self._fast_reader.read_expert,
+                    layer_idx,
+                    expert_idx,
+                    self._pool[slot],
                 )
             else:
                 madvise_willneed(src)

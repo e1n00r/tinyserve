@@ -6,9 +6,9 @@ import torch.nn.functional as F
 
 from tests.conftest import requires_cuda
 from tinyserve.cpu_expert import (
-    CPUINT4Forward,
-    CPUExpertForward,
     HAS_INT4_CPU,
+    CPUExpertForward,
+    CPUINT4Forward,
     mxfp4_to_int4pack,
 )
 from tinyserve.expert_store import TensorLayout, _pack_tensors
@@ -126,7 +126,8 @@ class TestMXFP4ToINT4Conversion:
         blocks, scales = _make_mxfp4_weights(OUT_FEATURES, IN_FEATURES)
         _, sz = mxfp4_to_int4pack(blocks, scales, GROUP_SIZE)
         torch.testing.assert_close(
-            sz[..., 1], torch.zeros_like(sz[..., 1]),
+            sz[..., 1],
+            torch.zeros_like(sz[..., 1]),
         )
 
 
@@ -140,12 +141,15 @@ class TestINT4ForwardMatchesReference:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        })
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        )
 
         h = torch.randn(1, IN_FEATURES)
         fwd = CPUINT4Forward(layout, group_size=GROUP_SIZE, act_fn=F.silu, num_threads=1)
@@ -170,12 +174,15 @@ class TestINT4ForwardMatchesReference:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        })
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        )
 
         h = torch.randn(1, IN_FEATURES)
         fwd = CPUINT4Forward(layout, group_size=GROUP_SIZE, act_fn=F.silu, num_threads=1)
@@ -193,12 +200,15 @@ class TestINT4ForwardGPURoundtrip:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        })
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        )
 
         h = torch.randn(1, IN_FEATURES, device="cuda")
         fwd = CPUINT4Forward(layout, group_size=GROUP_SIZE, act_fn=F.silu, num_threads=1)
@@ -216,12 +226,15 @@ class TestINT4ForwardSwiGLU:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        })
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        )
 
         h = torch.randn(1, IN_FEATURES)
         fwd = CPUINT4Forward(layout, group_size=GROUP_SIZE, act_fn=None, num_threads=1)
@@ -239,12 +252,15 @@ class TestINT4ForwardSwiGLU:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        })
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        )
 
         h = torch.randn(1, IN_FEATURES)
         fwd = CPUINT4Forward(layout, group_size=GROUP_SIZE, act_fn=None, num_threads=1)
@@ -279,12 +295,15 @@ class TestCPUExpertForwardMXFP4Integration:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        })
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        )
 
         h = torch.randn(1, IN_FEATURES)
         fwd = CPUExpertForward(layout, act_fn=F.silu, num_threads=1)
@@ -300,12 +319,15 @@ class TestCPUExpertForwardMXFP4Integration:
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
 
         layout = _make_mxfp4_layout(2 * OUT_FEATURES, IN_FEATURES, IN_FEATURES)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        })
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        )
 
         h = torch.randn(1, IN_FEATURES)
         fwd = CPUINT4Forward(layout, group_size=GROUP_SIZE, act_fn=F.silu, num_threads=1)
@@ -321,12 +343,15 @@ class TestCPUExpertForwardMXFP4Integration:
         gu_blocks, gu_scales = _make_mxfp4_weights(2 * OUT_FEATURES, IN_FEATURES)
         intermediate = OUT_FEATURES
         dn_blocks, dn_scales = _make_mxfp4_weights(IN_FEATURES, intermediate, seed=43)
-        packed = _pack(layout, {
-            "gate_up_proj": gu_blocks,
-            "gate_up_proj_scales": gu_scales,
-            "down_proj": dn_blocks,
-            "down_proj_scales": dn_scales,
-        })
+        packed = _pack(
+            layout,
+            {
+                "gate_up_proj": gu_blocks,
+                "gate_up_proj_scales": gu_scales,
+                "down_proj": dn_blocks,
+                "down_proj_scales": dn_scales,
+            },
+        )
 
         original = torch.get_num_threads()
         fwd = CPUINT4Forward(layout, group_size=GROUP_SIZE, act_fn=F.silu, num_threads=2)

@@ -159,7 +159,7 @@ def test_repeated_expert_is_cache_hit():
 def test_previous_token_experts_are_hits_after_begin_pass():
     """LeastStalePolicy: after begin_pass(), experts from the previous token are hits."""
     from tinyserve.expert_pipeline import ExpertPipeline
-    from tinyserve.expert_store import ExpertStore, ExpertCache
+    from tinyserve.expert_store import ExpertCache, ExpertStore
 
     hidden, intermediate = 32, 64
     num_layers, num_experts = 4, 8
@@ -177,8 +177,8 @@ def test_previous_token_experts_are_hits_after_begin_pass():
             store,
             template,
             device,
-            buf_a=store.allocate_buffer(device),
-            buf_b=store.allocate_buffer(device),
+            staging_buffer_a=store.allocate_buffer(device),
+            staging_buffer_b=store.allocate_buffer(device),
             transfer_stream=shared_transfer,
             compute_stream=shared_compute,
             cache=cache,

@@ -51,9 +51,7 @@ class ExpertBatcher:
             for wi, eid in enumerate(expert_ids):
                 if eid not in expert_groups:
                     expert_groups[eid] = []
-                expert_groups[eid].append(
-                    (item_idx, wi, item.hidden_states, item.routing_weights[wi].item())
-                )
+                expert_groups[eid].append((item_idx, wi, item.hidden_states, item.routing_weights[wi].item()))
 
         # Initialize per-request outputs
         outputs = [torch.zeros_like(item.hidden_states) for item in items]
@@ -74,9 +72,7 @@ class ExpertBatcher:
                     if pipeline._inline_fwd is not None:
                         out_batch = pipeline._inline_fwd(packed, h_batch)
                     else:
-                        out_batch = forward_from_packed(
-                            pipeline.template, packed, pipeline._param_refs, h_batch
-                        )
+                        out_batch = forward_from_packed(pipeline.template, packed, pipeline._param_refs, h_batch)
 
             # Cache miss: load via store -> buffer -> forward
             if out_batch is None:
@@ -88,9 +84,7 @@ class ExpertBatcher:
 
         return outputs
 
-    def _load_and_forward(
-        self, h_batch: torch.Tensor, layer_idx: int, eid: int
-    ) -> torch.Tensor:
+    def _load_and_forward(self, h_batch: torch.Tensor, layer_idx: int, eid: int) -> torch.Tensor:
         """Load expert from store to GPU buffer, forward the batch, optionally cache."""
         pipeline = self._pipeline
         buf = pipeline.staging_buffer_a

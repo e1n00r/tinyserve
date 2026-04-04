@@ -1,9 +1,7 @@
 """Tests for INT4 expert store disk cache."""
 
 import json
-import os
 
-import pytest
 import torch
 
 from tinyserve.int4_cache import (

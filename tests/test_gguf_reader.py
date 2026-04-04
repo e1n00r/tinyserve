@@ -364,7 +364,7 @@ def _create_fused_expert_gguf(path, n_layers=2, n_experts=4, expert_ffn_size=16,
 
     with open(path, "wb") as f:
         f.write(struct.pack("<I", 0x46554747))  # magic
-        f.write(struct.pack("<I", 3))            # version
+        f.write(struct.pack("<I", 3))  # version
         f.write(struct.pack("<Q", n_tensors))
         f.write(struct.pack("<Q", n_kv))
 

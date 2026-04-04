@@ -91,8 +91,10 @@ def fast_decode_step(
     if position_ids is None:
         past_len = past_key_values.get_seq_length() if past_key_values is not None else 0
         position_ids = torch.arange(
-            past_len, past_len + hidden.shape[1],
-            dtype=torch.long, device=hidden.device,
+            past_len,
+            past_len + hidden.shape[1],
+            dtype=torch.long,
+            device=hidden.device,
         ).unsqueeze(0)
 
     position_embeddings = inner.rotary_emb(hidden, position_ids)  # (cos, sin)

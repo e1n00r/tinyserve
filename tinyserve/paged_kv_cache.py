@@ -42,8 +42,14 @@ class PagedKVPool:
         self._device = torch.device(device)
         # Shape: [num_pages, num_layers, 2(K/V), num_kv_heads, PAGE_SIZE, head_dim]
         self._pool = torch.zeros(
-            num_pages, num_layers, 2, num_kv_heads, PAGE_SIZE, head_dim,
-            dtype=dtype, device=self._device,
+            num_pages,
+            num_layers,
+            2,
+            num_kv_heads,
+            PAGE_SIZE,
+            head_dim,
+            dtype=dtype,
+            device=self._device,
         )
         self._free_pages: list[int] = list(range(num_pages))
 
@@ -80,7 +86,7 @@ class PagedKVPool:
         n = data.shape[-2]
         if self._dtype != self._compute_dtype:
             data = data.to(self._dtype)
-        self._pool[page_id, layer_idx, kv_type, :, offset:offset + n] = data
+        self._pool[page_id, layer_idx, kv_type, :, offset : offset + n] = data
 
     def read(self, page_ids: list[int], layer_idx: int, kv_type: int, total_tokens: int) -> torch.Tensor:
         """Gather tokens from multiple pages into a contiguous tensor.
@@ -89,8 +95,12 @@ class PagedKVPool:
         """
         if not page_ids:
             return torch.zeros(
-                1, self.num_kv_heads, 0, self.head_dim,
-                dtype=self._compute_dtype, device=self._device,
+                1,
+                self.num_kv_heads,
+                0,
+                self.head_dim,
+                dtype=self._compute_dtype,
+                device=self._device,
             )
         full_pages = total_tokens // PAGE_SIZE
         remainder = total_tokens % PAGE_SIZE
@@ -160,8 +170,8 @@ class PagedRequestKVCache:
             offset = pos_cursor % PAGE_SIZE
             can_write = min(PAGE_SIZE - offset, new_tokens - written)
 
-            k_slice = key_states[:, :, written:written + can_write]  # [1, heads, n, dim]
-            v_slice = value_states[:, :, written:written + can_write]
+            k_slice = key_states[:, :, written : written + can_write]  # [1, heads, n, dim]
+            v_slice = value_states[:, :, written : written + can_write]
 
             self.pool.write(self.page_ids[page_idx], layer_idx, 0, offset, k_slice.squeeze(0))
             self.pool.write(self.page_ids[page_idx], layer_idx, 1, offset, v_slice.squeeze(0))

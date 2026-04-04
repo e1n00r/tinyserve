@@ -5,9 +5,8 @@ import torch.nn.functional as F
 
 from tests.conftest import requires_cuda
 from tinyserve.cpu_expert import CPUExpertForward
-from tinyserve.expert_store import ExpertStore, TensorLayout, _pack_tensors
+from tinyserve.expert_store import ExpertStore, TensorLayout
 from tinyserve.ram_cache import RAMCache, madvise_willneed
-
 
 HIDDEN = 64
 INTERMEDIATE = 128
@@ -92,7 +91,6 @@ class TestPipelineCPUExpert:
     @requires_cuda
     def test_cpu_expert_matches_gpu_pipeline(self):
         from tinyserve.expert_pipeline import ExpertPipeline
-        from tinyserve.expert_store import ExpertBuffer
 
         torch.manual_seed(42)
         store, layout, w_gu, w_dn = _make_store_and_weights()
@@ -122,8 +120,11 @@ class TestPipelineCPUExpert:
 
         # Pipeline WITHOUT cpu_expert (GPU-only).
         gpu_pipeline = ExpertPipeline(
-            store, template, device,
-            staging_buffer_a=staging_buffer_a, staging_buffer_b=staging_buffer_b,
+            store,
+            template,
+            device,
+            staging_buffer_a=staging_buffer_a,
+            staging_buffer_b=staging_buffer_b,
             transfer_stream=transfer_stream,
             compute_stream=compute_stream,
         )
@@ -138,8 +139,11 @@ class TestPipelineCPUExpert:
         ram = RAMCache(num_slots=4, expert_bytes=layout.total_bytes)
         cpu_fwd = CPUExpertForward(layout, act_fn=F.silu, num_threads=1)
         cpu_pipeline = ExpertPipeline(
-            store, template, device,
-            staging_buffer_a=staging_buffer_a, staging_buffer_b=staging_buffer_b,
+            store,
+            template,
+            device,
+            staging_buffer_a=staging_buffer_a,
+            staging_buffer_b=staging_buffer_b,
             transfer_stream=transfer_stream,
             compute_stream=compute_stream,
             ram_cache=ram,
@@ -291,7 +295,10 @@ class TestAutoPinnedVsMmap:
                 json.dump({"weight_map": weight_map}, f)
 
             result = ExpertStore.from_safetensors(
-                model_dir, "mlp", "experts", list(range(num_layers)),
+                model_dir,
+                "mlp",
+                "experts",
+                list(range(num_layers)),
                 disk_offload=True,
             )
             store, n_experts, ram_cache = result
@@ -345,7 +352,10 @@ class TestAutoPinnedVsMmap:
 
             with patch("os.sysconf", side_effect=fake_sysconf):
                 result = ExpertStore.from_safetensors(
-                    model_dir, "mlp", "experts", list(range(num_layers)),
+                    model_dir,
+                    "mlp",
+                    "experts",
+                    list(range(num_layers)),
                     disk_offload=True,
                 )
             store, n_experts, ram_cache = result

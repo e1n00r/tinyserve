@@ -24,8 +24,7 @@ HAS_INT4_CPU = hasattr(torch.ops.aten, "_weight_int4pack_mm_for_cpu") and hasatt
 
 # MXFP4 nibble look-up table: index [0..15] -> float value
 _FP4_LUT = torch.tensor(
-    [+0.0, +0.5, +1.0, +1.5, +2.0, +3.0, +4.0, +6.0,
-     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    [+0.0, +0.5, +1.0, +1.5, +2.0, +3.0, +4.0, +6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=torch.float32,
 )
 
@@ -107,9 +106,9 @@ class CPUINT4Forward:
         self._layout = layout
         self._int4_cache: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
-    def _convert_expert(self, expert_packed: torch.Tensor) -> tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-    ]:
+    def _convert_expert(
+        self, expert_packed: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Convert MXFP4 expert data to INT4 packed format.
 
         Returns: (gate_up_packed, gate_up_sz, down_packed, down_sz)
@@ -119,22 +118,22 @@ class CPUINT4Forward:
         gu_off = layout.offsets["gate_up_proj"]
         gu_sz = layout.sizes["gate_up_proj"]
         gu_shape = layout.specs["gate_up_proj"][0]
-        gu_blocks = expert_packed[gu_off:gu_off + gu_sz].view(torch.uint8).view(gu_shape)
+        gu_blocks = expert_packed[gu_off : gu_off + gu_sz].view(torch.uint8).view(gu_shape)
 
         gus_off = layout.offsets["gate_up_proj_scales"]
         gus_sz = layout.sizes["gate_up_proj_scales"]
         gus_shape = layout.specs["gate_up_proj_scales"][0]
-        gu_scales = expert_packed[gus_off:gus_off + gus_sz].view(torch.uint8).view(gus_shape)
+        gu_scales = expert_packed[gus_off : gus_off + gus_sz].view(torch.uint8).view(gus_shape)
 
         dn_off = layout.offsets["down_proj"]
         dn_sz = layout.sizes["down_proj"]
         dn_shape = layout.specs["down_proj"][0]
-        dn_blocks = expert_packed[dn_off:dn_off + dn_sz].view(torch.uint8).view(dn_shape)
+        dn_blocks = expert_packed[dn_off : dn_off + dn_sz].view(torch.uint8).view(dn_shape)
 
         dns_off = layout.offsets["down_proj_scales"]
         dns_sz = layout.sizes["down_proj_scales"]
         dns_shape = layout.specs["down_proj_scales"][0]
-        dn_scales = expert_packed[dns_off:dns_off + dns_sz].view(torch.uint8).view(dns_shape)
+        dn_scales = expert_packed[dns_off : dns_off + dns_sz].view(torch.uint8).view(dns_shape)
 
         gu_packed, gu_sz_tensor = mxfp4_to_int4pack(gu_blocks, gu_scales, self.group_size)
         dn_packed, dn_sz_tensor = mxfp4_to_int4pack(dn_blocks, dn_scales, self.group_size)
@@ -164,9 +163,7 @@ class CPUINT4Forward:
         old_threads = torch.get_num_threads()
         try:
             torch.set_num_threads(self._num_threads)
-            gate_up = torch.ops.aten._weight_int4pack_mm_for_cpu(
-                h, gu_packed, self.group_size, gu_sz
-            )
+            gate_up = torch.ops.aten._weight_int4pack_mm_for_cpu(h, gu_packed, self.group_size, gu_sz)
 
             if self._act_fn is not None:
                 gate, up = gate_up.chunk(2, dim=-1)
@@ -176,9 +173,7 @@ class CPUINT4Forward:
                 up = gate_up[..., 1::2].clamp(min=-7.0, max=7.0)
                 gated = (up + 1) * gate * torch.sigmoid(gate * _QUICK_GELU_COEFF)
 
-            out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-                gated, dn_packed, self.group_size, dn_sz
-            )
+            out = torch.ops.aten._weight_int4pack_mm_for_cpu(gated, dn_packed, self.group_size, dn_sz)
         finally:
             torch.set_num_threads(old_threads)
 
@@ -208,9 +203,7 @@ class CPUExpertForward:
                     "PyTorch build. Upgrade to PyTorch >= 2.10."
                 )
             self._variant = "mxfp4_int4"
-            self._int4_fwd = CPUINT4Forward(
-                layout, group_size=32, act_fn=act_fn, num_threads=num_threads
-            )
+            self._int4_fwd = CPUINT4Forward(layout, group_size=32, act_fn=act_fn, num_threads=num_threads)
             self._num_threads = num_threads
             self._act_fn = act_fn
             return
@@ -307,15 +300,19 @@ class CPUExpertForward:
         return F.linear(gated, w_dn)
 
     def _forward_separate(self, h: torch.Tensor, packed: torch.Tensor) -> torch.Tensor:
-        w_gate = packed[self._gate_proj_off : self._gate_proj_off + self._gate_proj_sz].view(
-            self._gate_proj_dtype
-        ).view(self._gate_proj_shape)
+        w_gate = (
+            packed[self._gate_proj_off : self._gate_proj_off + self._gate_proj_sz]
+            .view(self._gate_proj_dtype)
+            .view(self._gate_proj_shape)
+        )
         if self._gate_needs_t:
             w_gate = w_gate.t()
 
-        w_up = packed[self._up_proj_off : self._up_proj_off + self._up_proj_sz].view(
-            self._up_proj_dtype
-        ).view(self._up_proj_shape)
+        w_up = (
+            packed[self._up_proj_off : self._up_proj_off + self._up_proj_sz]
+            .view(self._up_proj_dtype)
+            .view(self._up_proj_shape)
+        )
         if self._up_needs_t:
             w_up = w_up.t()
 
@@ -324,9 +321,11 @@ class CPUExpertForward:
         else:
             gated = F.silu(F.linear(h, w_gate)) * F.linear(h, w_up)
 
-        w_dn = packed[self._down_proj_off : self._down_proj_off + self._down_proj_sz].view(
-            self._down_proj_dtype
-        ).view(self._down_proj_shape)
+        w_dn = (
+            packed[self._down_proj_off : self._down_proj_off + self._down_proj_sz]
+            .view(self._down_proj_dtype)
+            .view(self._down_proj_shape)
+        )
         if self._dn_needs_t:
             w_dn = w_dn.t()
         return F.linear(gated, w_dn)

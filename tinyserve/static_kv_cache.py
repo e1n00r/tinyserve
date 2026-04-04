@@ -18,6 +18,7 @@ class KVCacheOverflow(RuntimeError):
     Carries `tokens_needed` — how many additional tokens are required.
     VRAMBudget catches this and frees expert slots to extend the KV cache.
     """
+
     def __init__(self, tokens_needed: int):
         self.tokens_needed = tokens_needed
         super().__init__(f"KV cache overflow: need {tokens_needed} more tokens")
@@ -97,10 +98,7 @@ class StaticKVCache:
         layer_types = getattr(effective, "layer_types", None)
         if sliding_window is not None and layer_types is not None:
             cache._sliding_window = sliding_window
-            cache.is_sliding = [
-                lt == "sliding_attention"
-                for lt in layer_types[: effective.num_hidden_layers]
-            ]
+            cache.is_sliding = [lt == "sliding_attention" for lt in layer_types[: effective.num_hidden_layers]]
         elif sliding_window is not None:
             cache._sliding_window = sliding_window
             cache.is_sliding = [True] * effective.num_hidden_layers
@@ -113,22 +111,31 @@ class StaticKVCache:
 
     @property
     def vram_bytes(self) -> int:
-        return self._k.nelement() * self._k.element_size() + \
-               self._v.nelement() * self._v.element_size()
+        return self._k.nelement() * self._k.element_size() + self._v.nelement() * self._v.element_size()
 
     def extend(self, additional_tokens: int) -> None:
         """Grow KV cache capacity by additional_tokens."""
         new_max = self.max_seq_len + additional_tokens
         new_k = torch.zeros(
-            self.num_layers, 1, self.num_kv_heads, new_max, self.head_dim,
-            dtype=self._dtype, device=self._storage_device,
+            self.num_layers,
+            1,
+            self.num_kv_heads,
+            new_max,
+            self.head_dim,
+            dtype=self._dtype,
+            device=self._storage_device,
         )
         new_v = torch.zeros(
-            self.num_layers, 1, self.num_kv_heads, new_max, self.head_dim,
-            dtype=self._dtype, device=self._storage_device,
+            self.num_layers,
+            1,
+            self.num_kv_heads,
+            new_max,
+            self.head_dim,
+            dtype=self._dtype,
+            device=self._storage_device,
         )
-        new_k[:, :, :, :self.max_seq_len, :] = self._k
-        new_v[:, :, :, :self.max_seq_len, :] = self._v
+        new_k[:, :, :, : self.max_seq_len, :] = self._k
+        new_v[:, :, :, : self.max_seq_len, :] = self._v
         if self._storage_device != self._compute_device and self._storage_device == torch.device("cpu"):
             new_k = new_k.pin_memory()
             new_v = new_v.pin_memory()
@@ -143,7 +150,7 @@ class StaticKVCache:
         if end > self.max_seq_len:
             # Try self-healing before raising
             healed = False
-            if getattr(self, '_streaming', False):
+            if getattr(self, "_streaming", False):
                 self._evict_streaming(layer_idx)
                 start = self._seq_lens[layer_idx]
                 end = start + new_tokens
@@ -284,7 +291,7 @@ class StaticKVCache:
 
     def _evict_streaming(self, layer_idx: int) -> None:
         """Compact KV to [sinks | recent_window] if streaming is enabled."""
-        if not getattr(self, '_streaming', False):
+        if not getattr(self, "_streaming", False):
             return
         seq_len = self._seq_lens[layer_idx]
         max_kept = self._sink_size + self._window_size
@@ -298,17 +305,17 @@ class StaticKVCache:
 
         # Sinks are already at positions 0..sink_end — no copy needed
         # Window needs to shift from window_start to sink_end
-        self._k[layer_idx, :, :, sink_end:max_kept] = \
-            self._k[layer_idx, :, :, window_start:seq_len].clone()
-        self._v[layer_idx, :, :, sink_end:max_kept] = \
-            self._v[layer_idx, :, :, window_start:seq_len].clone()
+        self._k[layer_idx, :, :, sink_end:max_kept] = self._k[layer_idx, :, :, window_start:seq_len].clone()
+        self._v[layer_idx, :, :, sink_end:max_kept] = self._v[layer_idx, :, :, window_start:seq_len].clone()
 
         # Also shift scales if INT8 quantization is active
-        if getattr(self, '_k_scales', None) is not None:
-            self._k_scales[layer_idx, :, :, sink_end:max_kept] = \
-                self._k_scales[layer_idx, :, :, window_start:seq_len].clone()
-            self._v_scales[layer_idx, :, :, sink_end:max_kept] = \
-                self._v_scales[layer_idx, :, :, window_start:seq_len].clone()
+        if getattr(self, "_k_scales", None) is not None:
+            self._k_scales[layer_idx, :, :, sink_end:max_kept] = self._k_scales[
+                layer_idx, :, :, window_start:seq_len
+            ].clone()
+            self._v_scales[layer_idx, :, :, sink_end:max_kept] = self._v_scales[
+                layer_idx, :, :, window_start:seq_len
+            ].clone()
 
         self._seq_lens[layer_idx] = max_kept
 
@@ -330,8 +337,10 @@ class StaticKVCache:
         self._h2o_sink = sink_size
         # Cumulative attention scores per position per layer
         self._h2o_scores = torch.zeros(
-            self.num_layers, self.max_seq_len,
-            dtype=torch.float32, device=self._storage_device,
+            self.num_layers,
+            self.max_seq_len,
+            dtype=torch.float32,
+            device=self._storage_device,
         )
 
     def update_h2o_scores(self, attn_weights: torch.Tensor, layer_idx: int) -> None:
@@ -341,19 +350,17 @@ class StaticKVCache:
             attn_weights: [batch, heads, q_len, kv_len] attention weights
             layer_idx: which layer
         """
-        if not getattr(self, '_h2o', False):
+        if not getattr(self, "_h2o", False):
             return
         # Sum across batch, heads, and query positions
         scores = attn_weights.sum(dim=(0, 1, 2))  # [kv_len]
         seq_len = self._seq_lens[layer_idx]
         kv_len = min(scores.shape[0], seq_len)
-        self._h2o_scores[layer_idx, :kv_len] += scores[:kv_len].to(
-            device=self._storage_device, dtype=torch.float32
-        )
+        self._h2o_scores[layer_idx, :kv_len] += scores[:kv_len].to(device=self._storage_device, dtype=torch.float32)
 
     def _evict_h2o(self, layer_idx: int) -> None:
         """Evict low-scoring KV entries based on H2O scores."""
-        if not getattr(self, '_h2o', False):
+        if not getattr(self, "_h2o", False):
             return
         seq_len = self._seq_lens[layer_idx]
         if seq_len <= self._h2o_budget:
@@ -361,21 +368,18 @@ class StaticKVCache:
 
         scores = self._h2o_scores[layer_idx, :seq_len].clone()
         # Protect sink tokens (infinite score)
-        scores[:self._h2o_sink] = float('inf')
+        scores[: self._h2o_sink] = float("inf")
 
         # Select top-budget positions by score
         _, keep_indices = scores.topk(self._h2o_budget)
         keep_indices = keep_indices.sort().values  # maintain temporal order
 
         # Compact KV to keep only selected positions
-        self._k[layer_idx, :, :, :self._h2o_budget] = \
-            self._k[layer_idx, :, :, keep_indices].clone()
-        self._v[layer_idx, :, :, :self._h2o_budget] = \
-            self._v[layer_idx, :, :, keep_indices].clone()
+        self._k[layer_idx, :, :, : self._h2o_budget] = self._k[layer_idx, :, :, keep_indices].clone()
+        self._v[layer_idx, :, :, : self._h2o_budget] = self._v[layer_idx, :, :, keep_indices].clone()
 
         # Compact scores
-        self._h2o_scores[layer_idx, :self._h2o_budget] = \
-            self._h2o_scores[layer_idx, keep_indices].clone()
-        self._h2o_scores[layer_idx, self._h2o_budget:] = 0
+        self._h2o_scores[layer_idx, : self._h2o_budget] = self._h2o_scores[layer_idx, keep_indices].clone()
+        self._h2o_scores[layer_idx, self._h2o_budget :] = 0
 
         self._seq_lens[layer_idx] = self._h2o_budget

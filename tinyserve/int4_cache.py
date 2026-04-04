@@ -16,7 +16,7 @@ from pathlib import Path
 import torch
 
 logger = logging.getLogger(__name__)
-from safetensors.torch import load_file, save_file
+from safetensors.torch import save_file
 
 
 def int4_cache_path(model_id: str) -> str:
@@ -115,10 +115,7 @@ def load_int4_cache(
             data = f.get_tensor("expert_data")
 
         layout_specs_raw = json.loads(metadata["layout_specs"])
-        layout_specs = {
-            name: (tuple(shape), dtype_name)
-            for name, (shape, dtype_name) in layout_specs_raw.items()
-        }
+        layout_specs = {name: (tuple(shape), dtype_name) for name, (shape, dtype_name) in layout_specs_raw.items()}
 
         return {
             "data": data,
@@ -154,7 +151,4 @@ def _deserialize_layout_specs(
         "torch.int32": torch.int32,
         "torch.int64": torch.int64,
     }
-    return {
-        name: (tuple(shape), dtype_map[dtype_name])
-        for name, (shape, dtype_name) in raw.items()
-    }
+    return {name: (tuple(shape), dtype_map[dtype_name]) for name, (shape, dtype_name) in raw.items()}

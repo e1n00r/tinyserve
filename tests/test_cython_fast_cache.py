@@ -1,10 +1,13 @@
 """Tests for Cython-accelerated cache operations."""
-import pytest
+
 import time
+
+import pytest
 
 # Skip if Cython extension not compiled
 try:
-    from tinyserve._fast_cache import lfru_select_evict, classify_hits_misses, group_tokens_by_expert
+    from tinyserve._fast_cache import classify_hits_misses, group_tokens_by_expert, lfru_select_evict
+
     HAS_CYTHON = True
 except ImportError:
     HAS_CYTHON = False
@@ -15,9 +18,9 @@ pytestmark = pytest.mark.skipif(not HAS_CYTHON, reason="Cython extension not com
 def test_lfru_select_evict_correctness():
     """Cython eviction matches Python LFRU."""
     data = {
-        (0, 0): [0, 10, 100],   # freq=10, last=100
-        (0, 1): [1, 1, 99],     # freq=1, last=99
-        (0, 2): [2, 5, 50],     # freq=5, last=50
+        (0, 0): [0, 10, 100],  # freq=10, last=100
+        (0, 1): [1, 1, 99],  # freq=1, last=99
+        (0, 2): [2, 5, 50],  # freq=5, last=50
     }
     clock = 100
     key, slot = lfru_select_evict(data, clock)
@@ -54,7 +57,7 @@ def test_lfru_select_evict_speed():
     cy_time = time.perf_counter() - t0
 
     speedup = py_time / cy_time
-    print(f"\nPython: {py_time*1000:.1f}ms, Cython: {cy_time*1000:.1f}ms, speedup: {speedup:.1f}x")
+    print(f"\nPython: {py_time * 1000:.1f}ms, Cython: {cy_time * 1000:.1f}ms, speedup: {speedup:.1f}x")
     assert speedup > 3.0, f"Expected >3x speedup, got {speedup:.1f}x"
 
 

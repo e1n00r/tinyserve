@@ -1,15 +1,20 @@
 """Tests for StaticKVCache."""
 
-import torch
 import pytest
-from tinyserve.static_kv_cache import StaticKVCache
+import torch
+
 from tests.conftest import requires_cuda
+from tinyserve.static_kv_cache import StaticKVCache
 
 
 def test_basic_update_and_read():
     cache = StaticKVCache(
-        max_seq_len=64, num_layers=2, num_kv_heads=4,
-        head_dim=8, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=64,
+        num_layers=2,
+        num_kv_heads=4,
+        head_dim=8,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     assert cache.get_seq_length(0) == 0
     assert cache.get_seq_length(1) == 0
@@ -18,21 +23,23 @@ def test_basic_update_and_read():
     v = torch.randn(1, 4, 3, 8, dtype=torch.bfloat16)
 
     # Layer 0 update with cache_position
-    k_out, v_out = cache.update(k, v, layer_idx=0,
-                                 cache_kwargs={"cache_position": torch.tensor([0, 1, 2])})
+    k_out, v_out = cache.update(k, v, layer_idx=0, cache_kwargs={"cache_position": torch.tensor([0, 1, 2])})
     assert k_out.shape == (1, 4, 3, 8)
     assert torch.equal(k_out, k)
 
     # Layer 1 update
-    cache.update(k, v, layer_idx=1,
-                 cache_kwargs={"cache_position": torch.tensor([0, 1, 2])})
+    cache.update(k, v, layer_idx=1, cache_kwargs={"cache_position": torch.tensor([0, 1, 2])})
     assert cache.get_seq_length(1) == 3
 
 
 def test_sequential_decode():
     cache = StaticKVCache(
-        max_seq_len=32, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=32,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     # Prefill 5 tokens
     k = torch.randn(1, 2, 5, 4, dtype=torch.bfloat16)
@@ -50,8 +57,12 @@ def test_sequential_decode():
 
 def test_overflow_raises():
     cache = StaticKVCache(
-        max_seq_len=4, num_layers=1, num_kv_heads=1,
-        head_dim=2, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=4,
+        num_layers=1,
+        num_kv_heads=1,
+        head_dim=2,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     k = torch.randn(1, 1, 5, 2, dtype=torch.bfloat16)
     v = torch.randn(1, 1, 5, 2, dtype=torch.bfloat16)
@@ -61,8 +72,12 @@ def test_overflow_raises():
 
 def test_reset():
     cache = StaticKVCache(
-        max_seq_len=16, num_layers=2, num_kv_heads=1,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=16,
+        num_layers=2,
+        num_kv_heads=1,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     k = torch.randn(1, 1, 3, 4, dtype=torch.bfloat16)
     v = torch.randn(1, 1, 3, 4, dtype=torch.bfloat16)
@@ -76,8 +91,12 @@ def test_reset():
 
 def test_fp8_quantization():
     cache = StaticKVCache(
-        max_seq_len=16, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.float8_e4m3fn,
+        max_seq_len=16,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.float8_e4m3fn,
     )
     k = torch.randn(1, 2, 3, 4, dtype=torch.bfloat16)
     v = torch.randn(1, 2, 3, 4, dtype=torch.bfloat16)
@@ -103,8 +122,12 @@ def test_bytes_per_token():
 
 def test_iter_and_getitem():
     cache = StaticKVCache(
-        max_seq_len=8, num_layers=2, num_kv_heads=1,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=8,
+        num_layers=2,
+        num_kv_heads=1,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     k = torch.randn(1, 1, 3, 4, dtype=torch.bfloat16)
     v = torch.randn(1, 1, 3, 4, dtype=torch.bfloat16)
@@ -125,8 +148,12 @@ def test_iter_and_getitem():
 
 def test_mask_sizes():
     cache = StaticKVCache(
-        max_seq_len=32, num_layers=1, num_kv_heads=1,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=32,
+        num_layers=1,
+        num_kv_heads=1,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     # Before any tokens
     kv_len, offset = cache.get_mask_sizes(torch.tensor([0, 1, 2]), layer_idx=0)
@@ -144,8 +171,12 @@ def test_mask_sizes():
 
 def test_static_shapes_returns_full_tensors():
     cache = StaticKVCache(
-        max_seq_len=32, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=32,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
         static_shapes=True,
     )
     k = torch.randn(1, 2, 5, 4, dtype=torch.bfloat16)
@@ -170,8 +201,12 @@ def test_static_shapes_returns_full_tensors():
 
 def test_cpu_storage_gpu_return():
     cache = StaticKVCache(
-        max_seq_len=32, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=32,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
         storage_device=torch.device("cpu"),
     )
     k = torch.randn(1, 2, 5, 4, dtype=torch.bfloat16)
@@ -186,8 +221,12 @@ def test_cpu_storage_gpu_return():
 
 def test_cpu_storage_vram_bytes():
     cache = StaticKVCache(
-        max_seq_len=32, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=32,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
         storage_device=torch.device("cpu"),
     )
     # vram_bytes reports actual bytes regardless of storage device
@@ -197,8 +236,12 @@ def test_cpu_storage_vram_bytes():
 
 def test_cpu_storage_sequential_decode():
     cache = StaticKVCache(
-        max_seq_len=32, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=32,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
         storage_device=torch.device("cpu"),
     )
     k = torch.randn(1, 2, 5, 4, dtype=torch.bfloat16)
@@ -215,8 +258,12 @@ def test_cpu_storage_sequential_decode():
 
 def test_cpu_storage_fp8():
     cache = StaticKVCache(
-        max_seq_len=16, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.float8_e4m3fn,
+        max_seq_len=16,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.float8_e4m3fn,
         storage_device=torch.device("cpu"),
     )
     k = torch.randn(1, 2, 3, 4, dtype=torch.bfloat16)
@@ -229,9 +276,14 @@ def test_cpu_storage_fp8():
 
 def test_cpu_storage_static_shapes():
     cache = StaticKVCache(
-        max_seq_len=16, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
-        storage_device=torch.device("cpu"), static_shapes=True,
+        max_seq_len=16,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
+        storage_device=torch.device("cpu"),
+        static_shapes=True,
     )
     k = torch.randn(1, 2, 3, 4, dtype=torch.bfloat16)
     v = torch.randn(1, 2, 3, 4, dtype=torch.bfloat16)
@@ -249,7 +301,10 @@ def test_from_model_config_storage_device():
         head_dim = 8
 
     cache = StaticKVCache.from_model_config(
-        FakeConfig(), max_seq_len=32, device="cpu", dtype=torch.bfloat16,
+        FakeConfig(),
+        max_seq_len=32,
+        device="cpu",
+        dtype=torch.bfloat16,
         storage_device="cpu",
     )
     assert cache._storage_device == torch.device("cpu")
@@ -260,8 +315,12 @@ def test_from_model_config_storage_device():
 
 def test_default_storage_device_matches_device():
     cache = StaticKVCache(
-        max_seq_len=16, num_layers=1, num_kv_heads=1,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=16,
+        num_layers=1,
+        num_kv_heads=1,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     assert cache._storage_device == torch.device("cpu")
     assert cache._compute_device == torch.device("cpu")
@@ -271,8 +330,12 @@ def test_default_storage_device_matches_device():
 
 def test_static_shapes_default_off():
     cache = StaticKVCache(
-        max_seq_len=32, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=32,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     assert not cache.static_shapes
     k = torch.randn(1, 2, 5, 4, dtype=torch.bfloat16)
@@ -284,6 +347,7 @@ def test_static_shapes_default_off():
 
 def test_from_model_config_sliding_window_with_layer_types():
     """from_model_config populates is_sliding and _sliding_window from layer_types."""
+
     class FakeConfig:
         num_hidden_layers = 4
         num_key_value_heads = 2
@@ -292,12 +356,17 @@ def test_from_model_config_sliding_window_with_layer_types():
         head_dim = 8
         sliding_window = 16
         layer_types = [
-            "sliding_attention", "full_attention",
-            "sliding_attention", "full_attention",
+            "sliding_attention",
+            "full_attention",
+            "sliding_attention",
+            "full_attention",
         ]
 
     cache = StaticKVCache.from_model_config(
-        FakeConfig(), max_seq_len=64, device="cpu", dtype=torch.bfloat16,
+        FakeConfig(),
+        max_seq_len=64,
+        device="cpu",
+        dtype=torch.bfloat16,
     )
     assert cache._sliding_window == 16
     assert cache.is_sliding == [True, False, True, False]
@@ -305,6 +374,7 @@ def test_from_model_config_sliding_window_with_layer_types():
 
 def test_from_model_config_sliding_window_no_layer_types():
     """from_model_config marks all layers sliding when no layer_types present."""
+
     class FakeConfig:
         num_hidden_layers = 3
         num_key_value_heads = 2
@@ -314,7 +384,10 @@ def test_from_model_config_sliding_window_no_layer_types():
         sliding_window = 32
 
     cache = StaticKVCache.from_model_config(
-        FakeConfig(), max_seq_len=64, device="cpu", dtype=torch.bfloat16,
+        FakeConfig(),
+        max_seq_len=64,
+        device="cpu",
+        dtype=torch.bfloat16,
     )
     assert cache._sliding_window == 32
     assert cache.is_sliding == [True, True, True]
@@ -322,6 +395,7 @@ def test_from_model_config_sliding_window_no_layer_types():
 
 def test_from_model_config_no_sliding_window():
     """from_model_config leaves is_sliding all False when no sliding_window."""
+
     class FakeConfig:
         num_hidden_layers = 2
         num_key_value_heads = 2
@@ -330,7 +404,10 @@ def test_from_model_config_no_sliding_window():
         head_dim = 8
 
     cache = StaticKVCache.from_model_config(
-        FakeConfig(), max_seq_len=64, device="cpu", dtype=torch.bfloat16,
+        FakeConfig(),
+        max_seq_len=64,
+        device="cpu",
+        dtype=torch.bfloat16,
     )
     assert cache._sliding_window is None
     assert cache.is_sliding == [False, False]
@@ -346,8 +423,12 @@ def test_cpu_offload_sliding_layer_returns_window_tokens():
     """
     window = 4
     cache = StaticKVCache(
-        max_seq_len=32, num_layers=2, num_kv_heads=2,
-        head_dim=4, device=torch.device("meta"), dtype=torch.bfloat16,
+        max_seq_len=32,
+        num_layers=2,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("meta"),
+        dtype=torch.bfloat16,
         storage_device=torch.device("cpu"),
     )
     cache._sliding_window = window
@@ -370,8 +451,12 @@ def test_cpu_offload_sliding_layer_seq_within_window_returns_all():
     """When seq_len <= window, sliding layer still returns all tokens."""
     window = 16
     cache = StaticKVCache(
-        max_seq_len=32, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("meta"), dtype=torch.bfloat16,
+        max_seq_len=32,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("meta"),
+        dtype=torch.bfloat16,
         storage_device=torch.device("cpu"),
     )
     cache._sliding_window = window
@@ -388,8 +473,12 @@ def test_no_offload_sliding_layer_returns_full_seq():
     """Without CPU offload, sliding layer always returns full sequence (SDPA slices later)."""
     window = 4
     cache = StaticKVCache(
-        max_seq_len=32, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=32,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     cache._sliding_window = window
     cache.is_sliding = [True]
@@ -404,6 +493,7 @@ def test_no_offload_sliding_layer_returns_full_seq():
 # ---------------------------------------------------------------------------
 # StreamingLLM eviction tests
 # ---------------------------------------------------------------------------
+
 
 def test_streaming_eviction_self_heals_on_overflow():
     """update() self-heals via streaming eviction when cache would overflow.
@@ -421,8 +511,12 @@ def test_streaming_eviction_self_heals_on_overflow():
     sink = 4
     window = 200
     cache = StaticKVCache(
-        max_seq_len=max_seq_len, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=max_seq_len,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     cache.enable_streaming(sink_size=sink, window_size=window)
 
@@ -440,9 +534,7 @@ def test_streaming_eviction_self_heals_on_overflow():
 
     # After eviction + write, seq_len = sink + window (compacted) + 50 new tokens
     expected_len = sink + window + 50
-    assert cache.get_seq_length(0) == expected_len, (
-        f"Expected seq_len={expected_len}, got {cache.get_seq_length(0)}"
-    )
+    assert cache.get_seq_length(0) == expected_len, f"Expected seq_len={expected_len}, got {cache.get_seq_length(0)}"
     # Returned KV must include all tokens written so far
     assert k_out.shape[2] == expected_len
 
@@ -453,8 +545,12 @@ def test_streaming_eviction_repeated_overflow_self_heals():
     sink = 4
     window = 200
     cache = StaticKVCache(
-        max_seq_len=max_seq_len, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=max_seq_len,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     cache.enable_streaming(sink_size=sink, window_size=window)
 
@@ -482,16 +578,19 @@ def test_streaming_eviction_preserves_sink_tokens():
     sink = 4
     window = 20
     cache = StaticKVCache(
-        max_seq_len=max_seq_len, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=max_seq_len,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     cache.enable_streaming(sink_size=sink, window_size=window)
 
     # Fill cache with tokens 0..29, each token i has value i in all dims
-    k_fill = torch.stack([
-        torch.full((1, 2, 1, 4), float(i), dtype=torch.bfloat16)
-        for i in range(max_seq_len)
-    ], dim=2).squeeze(3)  # shape [1, 2, 30, 4]
+    k_fill = torch.stack(
+        [torch.full((1, 2, 1, 4), float(i), dtype=torch.bfloat16) for i in range(max_seq_len)], dim=2
+    ).squeeze(3)  # shape [1, 2, 30, 4]
     v_fill = torch.zeros(1, 2, max_seq_len, 4, dtype=torch.bfloat16)
     cache.update(k_fill, v_fill, layer_idx=0)
     assert cache.get_seq_length(0) == max_seq_len
@@ -513,9 +612,14 @@ def test_streaming_eviction_preserves_sink_tokens():
 def test_streaming_disabled_still_raises_overflow():
     """Without streaming, overflow still raises KVCacheOverflow as before."""
     from tinyserve.static_kv_cache import KVCacheOverflow
+
     cache = StaticKVCache(
-        max_seq_len=10, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=10,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     k = torch.randn(1, 2, 15, 4, dtype=torch.bfloat16)
     v = torch.randn(1, 2, 15, 4, dtype=torch.bfloat16)
@@ -529,8 +633,12 @@ def test_streaming_no_eviction_when_below_capacity():
     sink = 4
     window = 200
     cache = StaticKVCache(
-        max_seq_len=max_seq_len, num_layers=1, num_kv_heads=2,
-        head_dim=4, device=torch.device("cpu"), dtype=torch.bfloat16,
+        max_seq_len=max_seq_len,
+        num_layers=1,
+        num_kv_heads=2,
+        head_dim=4,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
     )
     cache.enable_streaming(sink_size=sink, window_size=window)
 
@@ -547,8 +655,11 @@ def test_streaming_no_eviction_when_below_capacity():
 def test_streaming_eviction_handles_seq_len_smaller_than_window():
     """Eviction when seq_len < window_size should keep all tokens, not wrap."""
     cache = StaticKVCache(
-        max_seq_len=64, num_layers=1, num_kv_heads=1,
-        head_dim=4, device=torch.device("cuda"),
+        max_seq_len=64,
+        num_layers=1,
+        num_kv_heads=1,
+        head_dim=4,
+        device=torch.device("cuda"),
     )
     cache.enable_streaming(sink_size=4, window_size=1024)
     k = torch.randn(1, 1, 32, 4, device="cuda", dtype=torch.bfloat16)
@@ -562,8 +673,11 @@ def test_streaming_eviction_handles_seq_len_smaller_than_window():
 def test_streaming_eviction_at_exact_capacity():
     """When seq_len == sink_size + window_size, no eviction needed."""
     cache = StaticKVCache(
-        max_seq_len=128, num_layers=1, num_kv_heads=1,
-        head_dim=4, device=torch.device("cuda"),
+        max_seq_len=128,
+        num_layers=1,
+        num_kv_heads=1,
+        head_dim=4,
+        device=torch.device("cuda"),
     )
     cache.enable_streaming(sink_size=4, window_size=60)
     k = torch.randn(1, 1, 64, 4, device="cuda", dtype=torch.bfloat16)

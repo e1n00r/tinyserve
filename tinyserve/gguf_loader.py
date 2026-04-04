@@ -16,14 +16,14 @@ from pathlib import Path
 
 import torch
 
-from .gguf_reader import GGML_TYPES, GGUFReader, GGUFTensorInfo
-from .gguf_dequant import _dequant_tensor, _dequant_fused_tensor
+from .gguf_dequant import _dequant_tensor
+from .gguf_reader import GGUFReader, GGUFTensorInfo
 from .gguf_weights import (
+    _build_expert_store_from_fused_reader,
+    _build_expert_store_from_reader,
     _find_tensor_info,
     _get_param,
     _set_param,
-    _build_expert_store_from_reader,
-    _build_expert_store_from_fused_reader,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,7 +108,7 @@ def config_from_metadata(metadata: dict) -> GGUFModelConfig:
     # Collect remaining arch-prefixed keys into extra
     for key, val in metadata.items():
         if key.startswith(prefix):
-            suffix = key[len(prefix):]
+            suffix = key[len(prefix) :]
             if suffix not in _META_KEY_MAP and suffix != "expert_shared_feed_forward_length":
                 cfg.extra[suffix] = val
 
@@ -224,6 +224,7 @@ def hf_to_gguf_name(hf_name: str) -> str:
 # Multi-shard GGUF reader
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _ShardedTensorInfo:
     """Tensor info with a reference to which shard (reader) contains it."""
@@ -320,7 +321,7 @@ class MultiShardGGUFReader:
             r.close()
 
 
-def open_gguf(path: str | Path) -> "MultiShardGGUFReader | GGUFReader":
+def open_gguf(path: str | Path) -> MultiShardGGUFReader | GGUFReader:
     """Open a single GGUF file or discover and open all shards.
 
     If ``path`` matches the shard naming pattern (``*-00001-of-*.gguf``),
@@ -356,6 +357,7 @@ def open_gguf(path: str | Path) -> "MultiShardGGUFReader | GGUFReader":
 # ---------------------------------------------------------------------------
 # Main loader
 # ---------------------------------------------------------------------------
+
 
 def load_from_gguf(
     gguf_path: str,
@@ -420,6 +422,7 @@ def load_from_gguf(
     with init_empty_weights():
         if "qwen3_5_moe" in model_type:
             from transformers import Qwen3_5MoeForCausalLM
+
             model = Qwen3_5MoeForCausalLM(hf_config).to(dtype=torch.bfloat16)
         else:
             model = AutoModelForCausalLM.from_config(hf_config, torch_dtype=torch.bfloat16)
@@ -506,7 +509,6 @@ def load_from_gguf(
     logger.info("Loaded %d non-expert weights, skipped %d", loaded, skipped)
 
     # Step 5: Expert weights -> expert store
-    from .gguf_store import GGUFExpertStore
 
     expert_groups = reader.list_expert_tensors()
 
