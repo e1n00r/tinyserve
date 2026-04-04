@@ -83,12 +83,29 @@ class GGMLLinear(nn.Module):
                 out = out + self.bias
             return out.reshape(*x.shape[:-1], self.out_features)
 
-        # Fallback: dequant to BF16, F.linear
+        # Batch > 1: loop over tokens with ggml kernel (avoids dequanting full weight to GPU)
+        if _check_ggml():
+            orig_shape = x.shape
+            x_flat = x.reshape(-1, x.shape[-1])  # [batch*seq, hidden]
+            outputs = []
+            for i in range(x_flat.shape[0]):
+                out_i = torch.ops.tinyserve_ggml.ggml_mul_mat_vec(
+                    x_flat[i:i+1], self._qweight, self._ggml_type,
+                    self.out_features, self.in_features,
+                )
+                outputs.append(out_i)
+            out = torch.cat(outputs, dim=0)
+            if self.bias is not None:
+                out = out + self.bias
+            return out.reshape(*orig_shape[:-1], self.out_features)
+
+        # Final fallback: dequant to CPU, matmul on CPU
         from .gguf_dequant_torch import dequant_tensor
         w_bytes = self._qweight.cpu().numpy().tobytes()
         w = dequant_tensor(w_bytes, self._ggml_type, (self.out_features, self.in_features))
-        w = w.to(device=x.device, dtype=x.dtype)
-        return F.linear(x, w, self.bias)
+        w = w.to(dtype=x.dtype)
+        out = F.linear(x.cpu(), w, self.bias.cpu() if self.bias is not None else None)
+        return out.to(x.device)
 
     def extra_repr(self) -> str:
         from .gguf_reader import GGML_TYPES
