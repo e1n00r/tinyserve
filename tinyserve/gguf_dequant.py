@@ -64,6 +64,44 @@ def _dequant_tensor(
         t = torch.from_numpy(values.reshape(info.shape))
         return t.to(torch.bfloat16).to(device)
 
+    if ggml_type == 13:  # Q5_K — 176 bytes per 256 elements
+        n_elements = 1
+        for d in info.shape:
+            n_elements *= d
+        n_blocks = n_elements // 256
+        values = np.empty(n_elements, dtype=np.float32)
+        for b in range(n_blocks):
+            block = raw[b * 176 : (b + 1) * 176]
+            # Q5_K layout: d(f16) + dmin(f16) + scales[12] + qh[32] + qs[128]
+            d_val = np.frombuffer(block[:2], dtype=np.float16).astype(np.float32)[0]
+            dmin = np.frombuffer(block[2:4], dtype=np.float16).astype(np.float32)[0]
+            scales_raw = block[4:16]
+            qh = np.frombuffer(block[16:48], dtype=np.uint8)
+            qs = np.frombuffer(block[48:176], dtype=np.uint8)
+            # Decode 6-bit scales and mins (same packing as Q4_K)
+            sc = np.zeros(8, dtype=np.float32)
+            mn = np.zeros(8, dtype=np.float32)
+            for i in range(8):
+                s_lo = scales_raw[i] & 0x0F
+                m_lo = (scales_raw[i] >> 4) & 0x0F
+                byte_idx = 8 + (i // 2)
+                shift = (i % 2) * 4
+                packed_hi = (scales_raw[byte_idx] >> shift) & 0x0F
+                s_hi = packed_hi & 0x03
+                m_hi = (packed_hi >> 2) & 0x03
+                sc[i] = d_val * (s_lo | (s_hi << 4))
+                mn[i] = dmin * (m_lo | (m_hi << 4))
+            # Decode 5-bit values: lower 4 bits from qs, 5th bit from qh
+            for i in range(8):
+                for j in range(32):
+                    idx = i * 32 + j
+                    q_lo = int(qs[idx // 2] >> (4 * (idx % 2))) & 0x0F
+                    q_hi = int(qh[idx // 8] >> (idx % 8)) & 1
+                    q = q_lo | (q_hi << 4)
+                    values[b * 256 + idx] = sc[i] * q - mn[i]
+        t = torch.from_numpy(values.reshape(info.shape))
+        return t.to(torch.bfloat16).to(device)
+
     if ggml_type == 14:  # Q6_K — 210 bytes per 256 elements
         n_elements = 1
         for d in info.shape:
@@ -149,7 +187,39 @@ def _dequant_fused_tensor(
         t = torch.from_numpy(values.reshape(shape_3d))
         return t.to(torch.bfloat16).to(device)
 
+    if ggml_type == 13:  # Q5_K — 176 bytes per 256 elements
+        n_blocks = n_elements // 256
+        values = np.empty(n_elements, dtype=np.float32)
+        for b in range(n_blocks):
+            block = raw[b * 176 : (b + 1) * 176]
+            d_val = np.frombuffer(block[:2], dtype=np.float16).astype(np.float32)[0]
+            dmin = np.frombuffer(block[2:4], dtype=np.float16).astype(np.float32)[0]
+            scales_raw = block[4:16]
+            qh = np.frombuffer(block[16:48], dtype=np.uint8)
+            qs = np.frombuffer(block[48:176], dtype=np.uint8)
+            sc = np.zeros(8, dtype=np.float32)
+            mn = np.zeros(8, dtype=np.float32)
+            for i in range(8):
+                s_lo = scales_raw[i] & 0x0F
+                m_lo = (scales_raw[i] >> 4) & 0x0F
+                byte_idx = 8 + (i // 2)
+                shift = (i % 2) * 4
+                packed_hi = (scales_raw[byte_idx] >> shift) & 0x0F
+                s_hi = packed_hi & 0x03
+                m_hi = (packed_hi >> 2) & 0x03
+                sc[i] = d_val * (s_lo | (s_hi << 4))
+                mn[i] = dmin * (m_lo | (m_hi << 4))
+            for i in range(8):
+                for j in range(32):
+                    idx = i * 32 + j
+                    q_lo = int(qs[idx // 2] >> (4 * (idx % 2))) & 0x0F
+                    q_hi = int(qh[idx // 8] >> (idx % 8)) & 1
+                    q = q_lo | (q_hi << 4)
+                    values[b * 256 + idx] = sc[i] * q - mn[i]
+        t = torch.from_numpy(values.reshape(shape_3d))
+        return t.to(torch.bfloat16).to(device)
+
     raise ValueError(
         f"Unsupported GGML type {ggml_type} ({GGML_TYPES.get(ggml_type, ('UNKNOWN',))[0]}) "
-        f"for fused expert tensor '{name}'. Only F32, F16, Q4_K, Q8_0 are supported."
+        f"for fused expert tensor '{name}'. Only F32, F16, Q4_K, Q5_K, Q8_0 are supported."
     )
