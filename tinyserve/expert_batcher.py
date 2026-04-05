@@ -66,7 +66,7 @@ class ExpertBatcher:
             # Try cache hit first
             out_batch = None
             if cache is not None:
-                slot = cache.lookup(layer_idx, eid)
+                slot = cache.locate((layer_idx, eid))
                 if slot is not None:
                     packed = cache.get_packed(slot)
                     if pipeline._inline_fwd is not None:
@@ -96,7 +96,7 @@ class ExpertBatcher:
 
         # Store in cache if available
         if pipeline.cache is not None:
-            slot = pipeline.cache.allocate(layer_idx, eid)
+            slot = pipeline.cache.claim_slot_for((layer_idx, eid))
             pipeline.cache.get_packed(slot).copy_(buf.packed)
 
         return out

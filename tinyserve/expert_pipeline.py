@@ -209,7 +209,7 @@ class ExpertPipeline:
 
             out_batch = None
             if cache is not None:
-                slot = cache.lookup(layer_idx, eid)
+                slot = cache.locate((layer_idx, eid))
                 if slot is not None:
                     packed = cache.get_packed(slot)
                     if self._inline_fwd is not None:
@@ -228,7 +228,7 @@ class ExpertPipeline:
                     out_batch = swap_weights_and_forward(self.template, buf, h_batch)
 
                 if cache is not None:
-                    slot = cache.allocate(layer_idx, eid)
+                    slot = cache.claim_slot_for((layer_idx, eid))
                     cache.get_packed(slot).copy_(buf.packed)
 
             for i, (tok_idx, k) in enumerate(zip(tok_indices, weight_indices)):
@@ -264,7 +264,7 @@ class ExpertPipeline:
                 eids_list = list(eids)
 
             for k, eid in enumerate(eids_list):
-                slot = cache.lookup(layer_idx, eid) if cache else None
+                slot = cache.locate((layer_idx, eid)) if cache else None
 
                 if slot is not None:
                     packed = cache.get_packed(slot)
@@ -275,7 +275,7 @@ class ExpertPipeline:
                     torch.cuda.synchronize()
                     out = self._nq_forward.forward(buf.packed, h, layer_idx=layer_idx)
                     if cache is not None:
-                        slot = cache.allocate(layer_idx, eid)
+                        slot = cache.claim_slot_for((layer_idx, eid))
                         cache.get_packed(slot).copy_(buf.packed)
 
                 output[tok] += weights[k] * out.squeeze(0)
@@ -315,7 +315,7 @@ class ExpertPipeline:
 
             out_batch = None
             if cache is not None:
-                slot = cache.lookup(layer_idx, eid)
+                slot = cache.locate((layer_idx, eid))
                 if slot is not None:
                     packed = cache.get_packed(slot)
                     out_batch = self._nq_forward.forward(packed, h_batch, layer_idx=layer_idx)
@@ -326,7 +326,7 @@ class ExpertPipeline:
                 torch.cuda.synchronize()
                 out_batch = self._nq_forward.forward(buf.packed, h_batch, layer_idx=layer_idx)
                 if cache is not None:
-                    slot = cache.allocate(layer_idx, eid)
+                    slot = cache.claim_slot_for((layer_idx, eid))
                     cache.get_packed(slot).copy_(buf.packed)
 
             for i, (tok_idx, k) in enumerate(zip(tok_indices, weight_indices)):
@@ -352,9 +352,9 @@ class ExpertPipeline:
         """
         _prof = self.profiler
 
-        if isinstance(expert_ids, torch.Tensor) and hasattr(cache, "lookup_slots"):
+        if isinstance(expert_ids, torch.Tensor) and hasattr(cache, "gpu_slots_for"):
             with _prof.phase("cache_lookup") if _prof else nullcontext():
-                slots = cache.lookup_slots(layer_idx, expert_ids)
+                slots = cache.gpu_slots_for(layer_idx, expert_ids)
                 # Consolidate two .tolist() calls (= two CUDA syncs) into one:
                 # stack expert_ids + slots into a single [2, top_k] tensor and
                 # call .tolist() once.  Unpack the two rows on the CPU side.
@@ -405,7 +405,7 @@ class ExpertPipeline:
             misses = []
             with _prof.phase("cache_lookup") if _prof else nullcontext():
                 for i, eid in enumerate(expert_ids_list):
-                    slot = cache.lookup(layer_idx, eid)
+                    slot = cache.locate((layer_idx, eid))
                     if slot is not None:
                         hits.append((i, slot))
                     else:
@@ -523,7 +523,7 @@ class ExpertPipeline:
                     cached_experts = set()
                 buddy_eid = buddy_tbl.find_cached_buddy(eid, cached_experts)
                 if buddy_eid is not None:
-                    buddy_slot = cache.lookup(layer_idx, buddy_eid)
+                    buddy_slot = cache.locate((layer_idx, buddy_eid))
                     if buddy_slot is not None:
                         packed = cache.get_packed(buddy_slot)
                         out = None
@@ -538,7 +538,7 @@ class ExpertPipeline:
             with _prof.phase("cpu_compute") if _prof else nullcontext():
                 out = self.cpu_expert.forward(h, expert_packed)
             output[tok_idx] += weights[i] * out.squeeze(0)
-            gpu_slot = cache.allocate(layer_idx, eid)
+            gpu_slot = cache.claim_slot_for((layer_idx, eid))
             cache.get_packed(gpu_slot).copy_(expert_packed[: cache.expert_bytes], non_blocking=True)
 
     def _handle_miss_gpu_pipeline(
@@ -568,7 +568,7 @@ class ExpertPipeline:
                     out = self.cpu_expert.forward(h, expert_data)
                     output[tok_idx] += weights[i] * out.squeeze(0)
                     if cache is not None:
-                        gpu_slot = cache.allocate(layer_idx, eid)
+                        gpu_slot = cache.claim_slot_for((layer_idx, eid))
                         cache.get_packed(gpu_slot).copy_(
                             ram.get_slot_data(ram.lookup(layer_idx, eid)), non_blocking=True
                         )
@@ -697,7 +697,7 @@ class ExpertPipeline:
             with torch.cuda.stream(self.compute_stream):
                 if cache is not None:
                     with _prof.phase("cache_store") if _prof else nullcontext():
-                        slot = cache.allocate(layer_idx, eid)
+                        slot = cache.claim_slot_for((layer_idx, eid))
                         cache.get_packed(slot).copy_(cur_buf.packed)
 
                 buf_done[buf_idx] = torch.cuda.Event()
@@ -754,7 +754,7 @@ class ExpertPipeline:
             for eid in expert_ids:
                 if self.cache.contains(layer_idx, eid):
                     continue
-                slot = self.cache.allocate(layer_idx, eid)
+                slot = self.cache.claim_slot_for((layer_idx, eid))
                 cache_slot = self.cache.get_packed(slot)
                 if self.store._fp8:
                     # Step 1: H2D raw FP8 bytes (half the BF16 size).

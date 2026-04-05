@@ -39,8 +39,8 @@ class ExpertCache:
         # Per-step tracking
         self._step_experts: set[tuple[int, int]] | None = None
         self._step_lookups: int = 0
-        # Slot map: CPU array is primary (written per-allocate, no CUDA kernel),
-        # GPU tensor is synced lazily before lookup_slots reads it.
+        # Slot map: CPU array is primary (written per-claim_slot_for, no CUDA kernel),
+        # GPU tensor is synced lazily before gpu_slots_for reads it.
         import numpy as np
 
         self._slot_map: torch.Tensor | None = None
@@ -50,15 +50,15 @@ class ExpertCache:
         if num_layers > 1 or num_experts > 1:
             self._slot_map_cpu = np.full((num_layers, num_experts), -1, dtype=np.int32)
             self._slot_map = torch.from_numpy(self._slot_map_cpu).to(dtype=torch.int32, device=device)
-        # Pre-allocated scalar -1 tensor for lookup_slots fallback path.
+        # Pre-allocated scalar -1 tensor for gpu_slots_for fallback path.
         self._neg_one = torch.tensor(-1, dtype=torch.int32, device=device)
 
-    def lookup(self, layer_idx: int, expert_idx: int) -> int | None:
-        slot = self._policy.locate((layer_idx, expert_idx))
-        key = (layer_idx, expert_idx)
-        self._expert_access_count[key] = self._expert_access_count.get(key, 0) + 1
+    def locate(self, expert_key: tuple[int, int]) -> int | None:
+        slot = self._policy.locate(expert_key)
+        layer_idx = expert_key[0]
+        self._expert_access_count[expert_key] = self._expert_access_count.get(expert_key, 0) + 1
         if self._step_experts is not None:
-            self._step_experts.add(key)
+            self._step_experts.add(expert_key)
             self._step_lookups += 1
         if slot is not None:
             self.hits += 1
@@ -101,8 +101,8 @@ class ExpertCache:
             self._slot_map_dims = (nl, ne)
             self._slot_map_dirty = False
 
-    def allocate(self, layer_idx: int, expert_idx: int) -> int:
-        key = (layer_idx, expert_idx)
+    def claim_slot_for(self, expert_key: tuple[int, int]) -> int:
+        layer_idx, expert_idx = expert_key
         if self._free_slots:
             slot = self._free_slots.pop()
         else:
@@ -111,20 +111,20 @@ class ExpertCache:
             if self._slot_map is not None:
                 self._slot_map_cpu[evict_key[0], evict_key[1]] = -1
                 self._slot_map_dirty = True
-        self._policy.register(key, slot)
+        self._policy.register(expert_key, slot)
         self._ensure_slot_map(layer_idx, expert_idx)
         self._slot_map_cpu[layer_idx, expert_idx] = slot
         self._slot_map_dirty = True
         return slot
 
     def flush_slot_updates(self):
-        """Sync CPU slot_map to GPU. Called automatically by lookup_slots."""
+        """Sync CPU slot_map to GPU. Called automatically by gpu_slots_for."""
         if not self._slot_map_dirty or self._slot_map_cpu is None:
             return
         self._slot_map.copy_(torch.from_numpy(self._slot_map_cpu), non_blocking=True)
         self._slot_map_dirty = False
 
-    def lookup_slots(self, layer_idx: int, expert_ids: torch.Tensor) -> torch.Tensor:
+    def gpu_slots_for(self, layer_idx: int, expert_ids: torch.Tensor) -> torch.Tensor:
         """GPU tensor cache lookup — syncs from CPU if dirty.
 
         Args:

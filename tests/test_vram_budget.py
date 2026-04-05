@@ -15,7 +15,7 @@ def test_cache_shrink_evicts_experts_and_reduces_capacity():
     cache = _make_cache(capacity=10)
     # Fill 8 slots
     for i in range(8):
-        cache.allocate(0, i)
+        cache.claim_slot_for((0, i))
     cache.flush_slot_updates()
     assert cache.capacity == 10
 
@@ -28,7 +28,7 @@ def test_cache_shrink_evicts_experts_and_reduces_capacity():
 def test_cache_grow_adds_free_slots_and_increases_capacity():
     cache = _make_cache(capacity=6)
     for i in range(6):
-        cache.allocate(0, i)
+        cache.claim_slot_for((0, i))
     cache.flush_slot_updates()
 
     cache.grow(4)  # grow by 4 slots
@@ -39,7 +39,7 @@ def test_cache_grow_adds_free_slots_and_increases_capacity():
 def test_cache_shrink_below_used_capacity_evicts_lru_experts():
     cache = _make_cache(capacity=8)
     for i in range(8):
-        cache.allocate(0, i)
+        cache.claim_slot_for((0, i))
     cache.flush_slot_updates()
 
     cache.shrink(6)  # shrink by 6, only 0 free → must evict 6
@@ -103,7 +103,7 @@ def test_vram_budget_shrinks_experts_when_kv_pressure_is_high():
 
     cache = _make_cache(capacity=10)
     for i in range(8):
-        cache.allocate(0, i)
+        cache.claim_slot_for((0, i))
     cache.flush_slot_updates()
 
     from tinyserve.static_kv_cache import StaticKVCache
@@ -126,7 +126,7 @@ def test_vram_budget_takes_no_action_when_usage_is_balanced():
 
     cache = _make_cache(capacity=10)
     for i in range(5):
-        cache.allocate(0, i)
+        cache.claim_slot_for((0, i))
     cache.flush_slot_updates()
 
     from tinyserve.static_kv_cache import StaticKVCache

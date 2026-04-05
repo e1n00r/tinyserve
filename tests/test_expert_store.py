@@ -148,10 +148,10 @@ def test_cache_allocate_and_lookup_returns_correct_slot():
 
     store.copy_to_buffer(buf, 0, 1, non_blocking=False)
     torch.cuda.synchronize()
-    slot = cache.allocate(0, 1)
+    slot = cache.claim_slot_for((0, 1))
     cache.store_from_buffer(slot, buf)
 
-    assert cache.lookup(0, 1) == slot
+    assert cache.locate((0, 1)) == slot
 
     cache.load_to_buffer(slot, buf)
     val = buf.get_tensor("w.weight").float().mean().item()

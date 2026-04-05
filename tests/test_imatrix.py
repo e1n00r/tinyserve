@@ -243,5 +243,5 @@ def test_seed_cache_slot_map_usable_after_seeding():
     seed_cache_from_ranking(cache, store, ranking)
 
     expert_ids = torch.tensor([0, 1, 2, 3], device=device)
-    slots = cache.lookup_slots(0, expert_ids)
+    slots = cache.gpu_slots_for(0, expert_ids)
     assert (slots >= 0).all(), f"Expected all slots valid, got {slots}"

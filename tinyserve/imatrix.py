@@ -89,7 +89,7 @@ def seed_cache_from_ranking(
             if loaded >= cache.capacity:
                 cache.flush_slot_updates()
                 return loaded
-            slot = cache.allocate(layer_idx, expert_idx)
+            slot = cache.claim_slot_for((layer_idx, expert_idx))
             store.copy_to_buffer_slot(cache, slot, layer_idx, expert_idx)
             loaded += 1
 
