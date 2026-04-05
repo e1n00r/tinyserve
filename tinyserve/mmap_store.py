@@ -137,6 +137,20 @@ class MmapExpertStore:
     def allocate_buffer(self, device: torch.device) -> ExpertBuffer:
         return ExpertBuffer(self.layout, device)
 
+    def copy_packed_weights(
+        self,
+        buf: ExpertBuffer,
+        layer_idx: int,
+        expert_idx: int,
+        non_blocking: bool = False,
+    ) -> None:
+        """Copy packed expert weights from mmap into a GPU buffer."""
+        raw = self._read_expert(layer_idx, expert_idx)
+        self._pinned_staging[: len(raw)].copy_(
+            torch.frombuffer(bytearray(raw), dtype=torch.uint8)
+        )
+        buf.packed.copy_(self._pinned_staging, non_blocking=non_blocking)
+
     def copy_to_buffer(
         self,
         buf: ExpertBuffer,
@@ -144,11 +158,7 @@ class MmapExpertStore:
         expert_idx: int,
         non_blocking: bool = False,
     ) -> None:
-        raw = self._read_expert(layer_idx, expert_idx)
-        self._pinned_staging[: len(raw)].copy_(
-            torch.frombuffer(bytearray(raw), dtype=torch.uint8)
-        )
-        buf.packed.copy_(self._pinned_staging, non_blocking=non_blocking)
+        self.copy_packed_weights(buf, layer_idx, expert_idx, non_blocking=non_blocking)
 
     def copy_to_buffer_slot(
         self,
@@ -412,6 +422,20 @@ class FusedMmapExpertStore:
     def allocate_buffer(self, device: torch.device) -> ExpertBuffer:
         return ExpertBuffer(self.layout, device)
 
+    def copy_packed_weights(
+        self,
+        buf: ExpertBuffer,
+        layer_idx: int,
+        expert_idx: int,
+        non_blocking: bool = False,
+    ) -> None:
+        """Copy packed expert weights from mmap into a GPU buffer."""
+        raw = self._read_expert(layer_idx, expert_idx)
+        self._pinned_staging[: len(raw)].copy_(
+            torch.frombuffer(bytearray(raw), dtype=torch.uint8)
+        )
+        buf.packed.copy_(self._pinned_staging, non_blocking=non_blocking)
+
     def copy_to_buffer(
         self,
         buf: ExpertBuffer,
@@ -419,11 +443,8 @@ class FusedMmapExpertStore:
         expert_idx: int,
         non_blocking: bool = False,
     ) -> None:
-        raw = self._read_expert(layer_idx, expert_idx)
-        self._pinned_staging[: len(raw)].copy_(
-            torch.frombuffer(bytearray(raw), dtype=torch.uint8)
-        )
-        buf.packed.copy_(self._pinned_staging, non_blocking=non_blocking)
+        # Backward-compat shim — removed in Task 12
+        return self.copy_packed_weights(buf, layer_idx, expert_idx, non_blocking=non_blocking)
 
     def copy_to_buffer_slot(
         self,

@@ -525,9 +525,13 @@ class ExpertStore:
         fp8_layout = self.layout if self._fp8 else None
         return ExpertBuffer(self._bf16_layout, device, fp8_layout=fp8_layout)
 
+    def packed_weights_for(self, layer_idx: int, expert_idx: int) -> torch.Tensor:
+        """Return raw packed expert weights from CPU store (pinned memory)."""
+        return self._data[layer_idx, expert_idx]
+
     def get_expert_data(self, layer_idx: int, expert_idx: int) -> torch.Tensor:
         """Return raw packed expert data from CPU store (pinned memory)."""
-        return self._data[layer_idx, expert_idx]
+        return self.packed_weights_for(layer_idx, expert_idx)
 
     def copy_to_buffer_slot(
         self,

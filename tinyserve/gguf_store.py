@@ -46,14 +46,14 @@ class GGUFINT4Forward:
         down_packed = _load("down_packed")
         down_sz = _load("down_sz")
 
-        h = hidden_states.to("cpu").to(torch.bfloat16)
+        hidden_states_cpu = hidden_states.to("cpu").to(torch.bfloat16)
 
         old_threads = torch.get_num_threads()
         try:
             torch.set_num_threads(self._num_threads)
 
-            gate_out = torch.ops.aten._weight_int4pack_mm_for_cpu(h, gate_packed, self.group_size, gate_sz)
-            up_out = torch.ops.aten._weight_int4pack_mm_for_cpu(h, up_packed, self.group_size, up_sz)
+            gate_out = torch.ops.aten._weight_int4pack_mm_for_cpu(hidden_states_cpu, gate_packed, self.group_size, gate_sz)
+            up_out = torch.ops.aten._weight_int4pack_mm_for_cpu(hidden_states_cpu, up_packed, self.group_size, up_sz)
 
             if self._act_fn is not None:
                 gated = self._act_fn(gate_out) * up_out

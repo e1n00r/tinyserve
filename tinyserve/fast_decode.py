@@ -86,25 +86,25 @@ def fast_decode_step(
     """
     inner = model.model  # GptOssModel
 
-    hidden = inner.embed_tokens(next_token)  # [1, 1, D]
+    hidden_states = inner.embed_tokens(next_token)  # [1, 1, D]
 
     if position_ids is None:
         past_len = past_key_values.get_seq_length() if past_key_values is not None else 0
         position_ids = torch.arange(
             past_len,
-            past_len + hidden.shape[1],
+            past_len + hidden_states.shape[1],
             dtype=torch.long,
-            device=hidden.device,
+            device=hidden_states.device,
         ).unsqueeze(0)
 
-    position_embeddings = inner.rotary_emb(hidden, position_ids)  # (cos, sin)
+    position_embeddings = inner.rotary_emb(hidden_states, position_ids)  # (cos, sin)
 
     # Pre-compute causal mask once for all layers.
     # For a single decode token with no padding, create_causal_mask returns
     # None (sdpa handles causal masking internally), so this is a no-op dict.
     mask_kwargs = {
         "config": inner.config,
-        "inputs_embeds": hidden,
+        "inputs_embeds": hidden_states,
         "attention_mask": None,
         "past_key_values": past_key_values,
     }
@@ -115,8 +115,8 @@ def fast_decode_step(
 
     for i, layer in enumerate(inner.layers):
         layer_type = inner.config.layer_types[i]
-        hidden = layer.forward(
-            hidden,
+        hidden_states = layer.forward(
+            hidden_states,
             attention_mask=causal_mask_mapping[layer_type],
             position_embeddings=position_embeddings,
             position_ids=position_ids,
@@ -124,8 +124,8 @@ def fast_decode_step(
             use_cache=past_key_values is not None,
         )
 
-    hidden = inner.norm(hidden)
-    return model.lm_head(hidden[:, -1:])  # [1, 1, vocab_size]
+    hidden_states = inner.norm(hidden_states)
+    return model.lm_head(hidden_states[:, -1:])  # [1, 1, vocab_size]
 
 
 def fast_generate_layerloop(
