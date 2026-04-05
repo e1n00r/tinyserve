@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import torch
 
-from .expert_pipeline import ExpertPipeline, forward_from_packed, swap_weights_and_forward
+from .expert_execution import ExpertPipeline, forward_from_packed, swap_weights_and_forward
 
 
 @dataclass
