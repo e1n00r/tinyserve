@@ -54,7 +54,7 @@ class TinyserveConfig:
     cache_bias: float = 0.0
     adaptive_fate: bool = True
     max_seq_len: int = 0
-    kv_dtype: torch.dtype = field(default_factory=lambda: torch.bfloat16)
+    kv_dtype: torch.dtype = field(default_factory=lambda: torch.float8_e4m3fn)
     gpu_memory_utilization: float = 0.90
     fp8: bool = True
     disk_offload: bool = False
@@ -405,7 +405,7 @@ def offload_model(
     cache_bias: float = 0.0,
     adaptive_fate: bool = True,
     max_seq_len: int = 0,
-    kv_dtype: torch.dtype = torch.bfloat16,
+    kv_dtype: torch.dtype = torch.float8_e4m3fn,
     gpu_memory_utilization: float = 0.90,
     attn_implementation: str | AttentionBackend | None = None,
     disk_offload: bool = False,
@@ -699,7 +699,7 @@ def load_and_offload(
     adaptive_fate: bool = True,
     attn_implementation: str | AttentionBackend | None = None,
     max_seq_len: int = 0,
-    kv_dtype: torch.dtype = torch.bfloat16,
+    kv_dtype: torch.dtype = torch.float8_e4m3fn,
     gpu_memory_utilization: float = 0.90,
     disk_offload: bool = False,
     ram_cache_gb: float = 0,

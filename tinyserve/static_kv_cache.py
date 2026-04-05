@@ -1,8 +1,9 @@
 """Static pre-allocated KV cache for zero-allocation decode.
 
 Replaces HuggingFace's DynamicCache (which does torch.cat per step)
-with a fixed-size tensor. Supports BF16 and FP8 storage with
-on-the-fly quantization/dequantization.
+with a fixed-size tensor. Default storage dtype is FP8 (e4m3fn) —
+50% less VRAM vs BF16. Keys and values are cast to FP8 on store and
+back to BF16 on read. Pass dtype=torch.bfloat16 to disable quantization.
 
 Usage:
     cache = StaticKVCache.from_model_config(config, max_seq_len=4096, device="cuda")
@@ -39,7 +40,7 @@ class StaticKVCache:
         num_kv_heads: int,
         head_dim: int,
         device: torch.device,
-        dtype: torch.dtype = torch.bfloat16,
+        dtype: torch.dtype = torch.float8_e4m3fn,
         static_shapes: bool = False,
         storage_device: torch.device | None = None,
     ):
@@ -80,7 +81,7 @@ class StaticKVCache:
         self._vram_budget = None  # Set by offload.py when VRAMBudget is created
 
     @classmethod
-    def from_model_config(cls, config, max_seq_len=4096, device="cuda", dtype=torch.bfloat16, storage_device=None):
+    def from_model_config(cls, config, max_seq_len=4096, device="cuda", dtype=torch.float8_e4m3fn, storage_device=None):
         effective = getattr(config, "text_config", config)
         head_dim = getattr(effective, "head_dim", None)
         if head_dim is None:
