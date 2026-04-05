@@ -499,8 +499,8 @@ def _install_offloaded_forward(
         _prof = pipeline.profiler
 
         if hidden_states.dim() == 3:
-            batch, seq_len, hidden = hidden_states.shape
-            flat = hidden_states.view(-1, hidden)
+            batch, seq_len, hidden_dim = hidden_states.shape
+            flat = hidden_states.view(-1, hidden_dim)
         else:
             flat = hidden_states
             batch, seq_len = None, None

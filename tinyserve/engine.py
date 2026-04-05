@@ -619,12 +619,12 @@ def offload_model(
 
     vram_budget = None
     if cache is not None and kv_cache is not None:
-        kv_bpt = kv_cache.vram_bytes // max(1, kv_cache.max_seq_len)
+        kv_bytes_per_token = kv_cache.vram_bytes // max(1, kv_cache.max_seq_len)
         vram_budget = VRAMBudget(
             expert_cache=cache,
             kv_cache=kv_cache,
             expert_bytes=buf_bytes,
-            kv_bytes_per_token=kv_bpt,
+            kv_bytes_per_token=kv_bytes_per_token,
             max_expert_capacity=cache_capacity,
         )
         kv_cache._vram_budget = vram_budget  # enables self-healing on overflow

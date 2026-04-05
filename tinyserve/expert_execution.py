@@ -228,8 +228,8 @@ class ExpertPipeline:
                     out_batch = swap_weights_and_forward(self.template, buf, h_batch)
 
                 if cache is not None:
-                    slot = cache.claim_slot_for((layer_idx, eid))
-                    cache.get_packed(slot).copy_(buf.packed)
+                    allocated_slot = cache.claim_slot_for((layer_idx, eid))
+                    cache.get_packed(allocated_slot).copy_(buf.packed)
 
             for i, (tok_idx, k) in enumerate(zip(tok_indices, weight_indices)):
                 output[tok_idx] += routing_weights[tok_idx, k] * out_batch[i]
@@ -254,7 +254,7 @@ class ExpertPipeline:
         cache = self.cache
 
         for tok in range(hidden_states.shape[0]):
-            h = hidden_states[tok : tok + 1]
+            token_hidden_states = hidden_states[tok : tok + 1]
             eids = expert_indices[tok]
             weights = routing_weights[tok]
 
@@ -264,19 +264,19 @@ class ExpertPipeline:
                 eids_list = list(eids)
 
             for k, eid in enumerate(eids_list):
-                slot = cache.locate((layer_idx, eid)) if cache else None
+                allocated_slot = cache.locate((layer_idx, eid)) if cache else None
 
-                if slot is not None:
-                    packed = cache.get_packed(slot)
-                    out = self._nq_forward.forward(packed, h, layer_idx=layer_idx)
+                if allocated_slot is not None:
+                    packed = cache.get_packed(allocated_slot)
+                    out = self._nq_forward.forward(packed, token_hidden_states, layer_idx=layer_idx)
                 else:
                     buf = self.staging_buffer_a
                     self.store.copy_to_buffer(buf, layer_idx, eid, non_blocking=False)
                     torch.cuda.synchronize()
-                    out = self._nq_forward.forward(buf.packed, h, layer_idx=layer_idx)
+                    out = self._nq_forward.forward(buf.packed, token_hidden_states, layer_idx=layer_idx)
                     if cache is not None:
-                        slot = cache.claim_slot_for((layer_idx, eid))
-                        cache.get_packed(slot).copy_(buf.packed)
+                        allocated_slot = cache.claim_slot_for((layer_idx, eid))
+                        cache.get_packed(allocated_slot).copy_(buf.packed)
 
                 output[tok] += weights[k] * out.squeeze(0)
 
@@ -326,8 +326,8 @@ class ExpertPipeline:
                 torch.cuda.synchronize()
                 out_batch = self._nq_forward.forward(buf.packed, h_batch, layer_idx=layer_idx)
                 if cache is not None:
-                    slot = cache.claim_slot_for((layer_idx, eid))
-                    cache.get_packed(slot).copy_(buf.packed)
+                    allocated_slot = cache.claim_slot_for((layer_idx, eid))
+                    cache.get_packed(allocated_slot).copy_(buf.packed)
 
             for i, (tok_idx, k) in enumerate(zip(tok_indices, weight_indices)):
                 output[tok_idx] += routing_weights[tok_idx, k] * out_batch[i]
@@ -345,9 +345,9 @@ class ExpertPipeline:
         """Classify expert_ids into cache hits and misses.
 
         Returns:
-            (hits, misses, expert_ids_list)
+            (hits, uncached_expert_indices, expert_ids_list)
             hits: list of (position_idx, cache_slot)
-            misses: list of position indices that missed
+            uncached_expert_indices: list of position indices that missed
             expert_ids_list: expert IDs as a Python list
         """
         _prof = self.profiler
@@ -364,9 +364,9 @@ class ExpertPipeline:
                 slots_list: list[int] = _both[1]
 
             hits: list[tuple[int, int]] = []
-            misses: list[int] = []
+            uncached_expert_indices: list[int] = []
             if _cython_classify_hits is not None:
-                hits, misses = _cython_classify_hits(expert_ids_list, slots_list)
+                hits, uncached_expert_indices = _cython_classify_hits(expert_ids_list, slots_list)
                 for i, slot in hits:
                     cache._policy.locate((layer_idx, expert_ids_list[i]))
                     cache.hits += 1
@@ -374,7 +374,7 @@ class ExpertPipeline:
                     cache._expert_access_count[(layer_idx, expert_ids_list[i])] = (
                         cache._expert_access_count.get((layer_idx, expert_ids_list[i]), 0) + 1
                     )
-                for i in misses:
+                for i in uncached_expert_indices:
                     cache.misses += 1
                     cache._layer_misses[layer_idx] = cache._layer_misses.get(layer_idx, 0) + 1
                     cache._expert_access_count[(layer_idx, expert_ids_list[i])] = (
@@ -391,7 +391,7 @@ class ExpertPipeline:
                             cache._expert_access_count.get((layer_idx, eid), 0) + 1
                         )
                     else:
-                        misses.append(i)
+                        uncached_expert_indices.append(i)
                         cache.misses += 1
                         cache._layer_misses[layer_idx] = cache._layer_misses.get(layer_idx, 0) + 1
                         cache._expert_access_count[(layer_idx, eid)] = (
@@ -402,21 +402,21 @@ class ExpertPipeline:
                 expert_ids = expert_ids.tolist()
             expert_ids_list = expert_ids
             hits = []
-            misses = []
+            uncached_expert_indices = []
             with _prof.phase("cache_lookup") if _prof else nullcontext():
                 for i, eid in enumerate(expert_ids_list):
                     slot = cache.locate((layer_idx, eid))
                     if slot is not None:
                         hits.append((i, slot))
                     else:
-                        misses.append(i)
+                        uncached_expert_indices.append(i)
 
-        return hits, misses, expert_ids_list
+        return hits, uncached_expert_indices, expert_ids_list
 
     def _forward_cache_hits(
         self,
         hits: list[tuple[int, int]],
-        h: torch.Tensor,
+        hidden_states: torch.Tensor,
         output: torch.Tensor,
         tok_idx: int,
         weights: torch.Tensor,
@@ -436,7 +436,7 @@ class ExpertPipeline:
             slots_tensor = self._slots_buf[:n_hits]
             weights_tensor = self._weights_buf[:n_hits]
             out = _cpp.fast_expert_forward(
-                h,
+                hidden_states,
                 slots_tensor,
                 weights_tensor,
                 cache._packed,
@@ -471,7 +471,7 @@ class ExpertPipeline:
 
             _cython_forward_hits(
                 hits,
-                h,
+                hidden_states,
                 output,
                 tok_idx,
                 weights,
@@ -490,15 +490,15 @@ class ExpertPipeline:
                 packed = cache.get_packed(slot)
                 out = None
                 if _inline is not None:
-                    out = _inline(packed, h)
+                    out = _inline(packed, hidden_states)
                 if out is None:
-                    out = forward_from_packed(self.template, packed, self._param_refs, h)
+                    out = forward_from_packed(self.template, packed, self._param_refs, hidden_states)
                 output[tok_idx] += weights[i] * out.squeeze(0)
 
     def _handle_miss_fallback(
         self,
-        misses: list[int],
-        h: torch.Tensor,
+        uncached_expert_indices: list[int],
+        hidden_states: torch.Tensor,
         output: torch.Tensor,
         tok_idx: int,
         layer_idx: int,
@@ -510,7 +510,7 @@ class ExpertPipeline:
         _prof = self.profiler
         _inline = self._inline_fwd
 
-        for i in misses:
+        for i in uncached_expert_indices:
             eid = expert_ids_list[i]
 
             buddy_tbl = (self._buddy_tables or {}).get(layer_idx)
@@ -528,23 +528,23 @@ class ExpertPipeline:
                         packed = cache.get_packed(buddy_slot)
                         out = None
                         if _inline is not None:
-                            out = _inline(packed, h)
+                            out = _inline(packed, hidden_states)
                         if out is None:
-                            out = forward_from_packed(self.template, packed, self._param_refs, h)
+                            out = forward_from_packed(self.template, packed, self._param_refs, hidden_states)
                         output[tok_idx] += weights[i] * out.squeeze(0)
                         continue
 
             expert_packed = self.store.get_expert_data(layer_idx, eid)
             with _prof.phase("cpu_compute") if _prof else nullcontext():
-                out = self.cpu_expert.forward(h, expert_packed)
+                out = self.cpu_expert.forward(hidden_states, expert_packed)
             output[tok_idx] += weights[i] * out.squeeze(0)
             gpu_slot = cache.claim_slot_for((layer_idx, eid))
             cache.get_packed(gpu_slot).copy_(expert_packed[: cache.expert_bytes], non_blocking=True)
 
     def _handle_miss_gpu_pipeline(
         self,
-        misses: list[int],
-        h: torch.Tensor,
+        uncached_expert_indices: list[int],
+        hidden_states: torch.Tensor,
         output: torch.Tensor,
         tok_idx: int,
         layer_idx: int,
@@ -553,10 +553,10 @@ class ExpertPipeline:
         cache: ExpertCache,
     ):
         """Double-buffered H2D pipeline for misses, with optional RAM-split routing."""
-        if self.cpu_expert is not None and self.ram_cache is not None and h.shape[0] == 1:
+        if self.cpu_expert is not None and self.ram_cache is not None and hidden_states.shape[0] == 1:
             ram = self.ram_cache
             cold_misses = []
-            for i in misses:
+            for i in uncached_expert_indices:
                 eid = expert_ids_list[i]
                 ram.wait_pending(layer_idx, eid)
                 slot = ram.lookup(layer_idx, eid)
@@ -565,7 +565,7 @@ class ExpertPipeline:
                 else:
                     ram_slot = ram.load_sync(layer_idx, eid, self.store._data[layer_idx, eid])
                     expert_data = ram.get_slot_data(ram_slot)
-                    out = self.cpu_expert.forward(h, expert_data)
+                    out = self.cpu_expert.forward(hidden_states, expert_data)
                     output[tok_idx] += weights[i] * out.squeeze(0)
                     if cache is not None:
                         gpu_slot = cache.claim_slot_for((layer_idx, eid))
@@ -574,16 +574,16 @@ class ExpertPipeline:
                         )
             if not cold_misses:
                 return
-            misses = cold_misses
+            uncached_expert_indices = cold_misses
 
-        self._pipeline_experts(h, output, tok_idx, layer_idx, expert_ids_list, weights, misses)
+        self._pipeline_experts(hidden_states, output, tok_idx, layer_idx, expert_ids_list, weights, uncached_expert_indices)
         _evt = torch.cuda.Event()
         _evt.record(self.compute_stream)
         torch.cuda.current_stream().wait_event(_evt)
 
     def _execute_token_experts(
         self,
-        h: torch.Tensor,
+        hidden_states: torch.Tensor,
         output: torch.Tensor,
         tok_idx: int,
         layer_idx: int,
@@ -593,17 +593,17 @@ class ExpertPipeline:
         if self.cache is None:
             if isinstance(expert_ids, torch.Tensor):
                 expert_ids = expert_ids.tolist()
-            self._pipeline_experts(h, output, tok_idx, layer_idx, expert_ids, weights, list(range(len(expert_ids))))
+            self._pipeline_experts(hidden_states, output, tok_idx, layer_idx, expert_ids, weights, list(range(len(expert_ids))))
             _evt = torch.cuda.Event()
             _evt.record(self.compute_stream)
             torch.cuda.current_stream().wait_event(_evt)
             return
 
         cache = self.cache
-        hits, misses, expert_ids_list = self._classify_hits_misses(cache, layer_idx, expert_ids)
+        hits, uncached_expert_indices, expert_ids_list = self._classify_hits_misses(cache, layer_idx, expert_ids)
 
-        self._forward_cache_hits(hits, h, output, tok_idx, weights, cache)
-        if not misses:
+        self._forward_cache_hits(hits, hidden_states, output, tok_idx, weights, cache)
+        if not uncached_expert_indices:
             if hasattr(cache, "flush_slot_updates"):
                 cache.flush_slot_updates()
             return
@@ -615,19 +615,19 @@ class ExpertPipeline:
             _hit_done.record()
             self.compute_stream.wait_event(_hit_done)
 
-        if self.cpu_on_miss and self.cpu_expert is not None and h.shape[0] == 1:
-            self._handle_miss_fallback(misses, h, output, tok_idx, layer_idx, expert_ids_list, weights, cache)
+        if self.cpu_on_miss and self.cpu_expert is not None and hidden_states.shape[0] == 1:
+            self._handle_miss_fallback(uncached_expert_indices, hidden_states, output, tok_idx, layer_idx, expert_ids_list, weights, cache)
             if hasattr(cache, "flush_slot_updates"):
                 cache.flush_slot_updates()
             return
 
-        self._handle_miss_gpu_pipeline(misses, h, output, tok_idx, layer_idx, expert_ids_list, weights, cache)
+        self._handle_miss_gpu_pipeline(uncached_expert_indices, hidden_states, output, tok_idx, layer_idx, expert_ids_list, weights, cache)
         if hasattr(cache, "flush_slot_updates"):
             cache.flush_slot_updates()
 
     def _pipeline_experts(
         self,
-        h: torch.Tensor,
+        hidden_states: torch.Tensor,
         output: torch.Tensor,
         tok_idx: int,
         layer_idx: int,
@@ -691,14 +691,14 @@ class ExpertPipeline:
 
             with _prof.phase("gpu_compute") if _prof else nullcontext():
                 with torch.cuda.stream(self.compute_stream):
-                    out = swap_weights_and_forward(self.template, cur_buf, h)
+                    out = swap_weights_and_forward(self.template, cur_buf, hidden_states)
                     output[tok_idx] += weights[idx] * out.squeeze(0)
 
             with torch.cuda.stream(self.compute_stream):
                 if cache is not None:
                     with _prof.phase("cache_store") if _prof else nullcontext():
-                        slot = cache.claim_slot_for((layer_idx, eid))
-                        cache.get_packed(slot).copy_(cur_buf.packed)
+                        allocated_slot = cache.claim_slot_for((layer_idx, eid))
+                        cache.get_packed(allocated_slot).copy_(cur_buf.packed)
 
                 buf_done[buf_idx] = torch.cuda.Event()
                 buf_done[buf_idx].record(self.compute_stream)
@@ -754,8 +754,8 @@ class ExpertPipeline:
             for eid in expert_ids:
                 if self.cache.contains(layer_idx, eid):
                     continue
-                slot = self.cache.claim_slot_for((layer_idx, eid))
-                cache_slot = self.cache.get_packed(slot)
+                allocated_slot = self.cache.claim_slot_for((layer_idx, eid))
+                cache_slot = self.cache.get_packed(allocated_slot)
                 if self.store._fp8:
                     # Step 1: H2D raw FP8 bytes (half the BF16 size).
                     self._prefetch_fp8_stage.copy_(self.store._data[layer_idx, eid], non_blocking=True)
