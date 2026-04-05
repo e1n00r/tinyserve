@@ -24,7 +24,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     gguf_path = getattr(args, "gguf", None)
 
     if gguf_path:
-        from .gguf_loader import load_from_gguf
+        from .gguf_model_loader import load_from_gguf
 
         print(f"Loading from GGUF: {gguf_path} ...")
         model = load_from_gguf(gguf_path, model_id=args.model)

@@ -100,7 +100,7 @@ class GGMLLinear(nn.Module):
             return out.reshape(*orig_shape[:-1], self.out_features)
 
         # Final fallback: dequant to CPU, matmul on CPU
-        from .gguf_dequant_torch import dequant_tensor
+        from .gguf_dequant import dequant_tensor
         w_bytes = self._qweight.cpu().numpy().tobytes()
         w = dequant_tensor(w_bytes, self._ggml_type, (self.out_features, self.in_features))
         w = w.to(dtype=x.dtype)

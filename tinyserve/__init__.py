@@ -19,7 +19,7 @@ __all__ = [
     "OffloadedLM",
 ]
 
-from .gguf_loader import load_from_gguf as load_from_gguf
+from .gguf_model_loader import load_from_gguf as load_from_gguf
 from .engine import OffloadedLM as OffloadedLM
 from .engine import OffloadConfig as OffloadConfig
 from .engine import OffloadConfig as TinyserveConfig  # backward-compat

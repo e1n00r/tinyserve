@@ -116,7 +116,7 @@ class GGMLExpertForward:
 
     def _fallback_forward(self, packed: torch.Tensor, h: torch.Tensor,
                           ggml_types: dict[str, int] | None = None) -> torch.Tensor:
-        from .gguf_dequant_torch import dequant_tensor
+        from .gguf_dequant import dequant_tensor
 
         if ggml_types is None:
             ggml_types = self._ggml_types

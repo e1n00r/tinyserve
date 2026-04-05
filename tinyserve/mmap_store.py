@@ -24,7 +24,7 @@ import torch
 from .expert_cache import ExpertCache
 from .expert_store import ExpertBuffer, TensorLayout
 from .gguf_dequant import _dequant_fused_tensor
-from .gguf_loader import open_gguf
+from .gguf_model_loader import open_gguf
 from .gguf_reader import GGML_TYPES, GGUFTensorInfo
 
 
@@ -503,7 +503,7 @@ def _convert_fused_to_per_expert(gguf_path: Path, experts_path: Path) -> None:
             logger.info("Converting layer %d/%d...", li + 1, len(layers))
 
             # Use vectorized city96 dequant (100x faster than loop-based _dequant_fused_tensor)
-            from .gguf_dequant_torch import dequant_tensor
+            from .gguf_dequant import dequant_tensor
 
             def _dequant_fused(tensor_info):
                 raw = reader.get_tensor_data(tensor_info.name if hasattr(tensor_info, 'name') else tensor_info)
