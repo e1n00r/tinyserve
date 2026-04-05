@@ -11,12 +11,14 @@ def test_public_api_importable():
 
 
 def test_config_defaults():
-    from tinyserve import TinyserveConfig
+    from tinyserve import OffloadConfig, TinyserveConfig
 
-    cfg = TinyserveConfig()
-    assert cfg.cache_capacity == 0
-    assert cfg.cache_policy == "lfru"
-    assert cfg.gpu_memory_utilization == 0.90
+    cfg = OffloadConfig()
+    assert cfg.expert_cache_slots == 0
+    assert cfg.eviction_policy == "lfru"
+    assert cfg.vram_fraction == 0.90
+
+    assert TinyserveConfig is OffloadConfig
 
 
 def test_offloaded_lm_importable():

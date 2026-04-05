@@ -507,18 +507,18 @@ def main():
 
     from transformers import AutoTokenizer
 
-    from .offload import TinyserveConfig, load_and_offload
+    from .engine import OffloadConfig, load_and_offload
 
     kv_dtype = torch.float8_e4m3fn if args.kv_fp8 else torch.bfloat16
-    cfg = TinyserveConfig(
-        cache_capacity=args.cache_capacity,
-        cache_policy=args.cache_policy,
-        max_seq_len=args.max_seq_len,
-        kv_dtype=kv_dtype,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        streaming=args.streaming,
-        streaming_sink_size=args.streaming_sink_size,
-        streaming_window_size=args.streaming_window_size,
+    cfg = OffloadConfig(
+        expert_cache_slots=args.cache_capacity,
+        eviction_policy=args.cache_policy,
+        max_context_tokens=args.max_seq_len,
+        kv_storage_dtype=kv_dtype,
+        vram_fraction=args.gpu_memory_utilization,
+        sliding_window_kv=args.streaming,
+        kv_sink_tokens=args.streaming_sink_size,
+        kv_window_tokens=args.streaming_window_size,
     )
     model = load_and_offload(args.model, offload_config=cfg)
     tokenizer = AutoTokenizer.from_pretrained(args.model)

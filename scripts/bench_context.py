@@ -13,7 +13,7 @@ import time
 import torch
 from transformers import AutoTokenizer
 
-from tinyserve.offload import TinyserveConfig, load_and_offload
+from tinyserve.engine import OffloadConfig, load_and_offload
 from tinyserve.static_kv_cache import StaticKVCache
 from tinyserve.chunked import chunked_prefill
 
@@ -115,13 +115,13 @@ def main():
     else:
         effective_max_seq = max(max(contexts) + decode_budget, args.max_seq_len)
 
-    cfg = TinyserveConfig(
-        streaming=args.streaming,
-        streaming_window_size=args.streaming_window,
-        streaming_sink_size=4,
-        max_seq_len=effective_max_seq,
-        fp8=True,
-        adaptive_fate=True,
+    cfg = OffloadConfig(
+        sliding_window_kv=args.streaming,
+        kv_window_tokens=args.streaming_window,
+        kv_sink_tokens=4,
+        max_context_tokens=effective_max_seq,
+        compress_weights=True,
+        temporal_prefetch=True,
     )
 
     model = load_and_offload(

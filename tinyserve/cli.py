@@ -30,13 +30,13 @@ def cmd_run(args: argparse.Namespace) -> None:
         model = load_from_gguf(gguf_path, model_id=args.model)
         tokenizer = AutoTokenizer.from_pretrained(args.model)
     else:
-        from .offload import TinyserveConfig, load_and_offload
+        from .engine import OffloadConfig, load_and_offload
 
         print(f"Loading {args.model} ...")
-        cfg = TinyserveConfig(
-            streaming=args.streaming,
-            streaming_sink_size=args.streaming_sink_size,
-            streaming_window_size=args.streaming_window_size,
+        cfg = OffloadConfig(
+            sliding_window_kv=args.streaming,
+            kv_sink_tokens=args.streaming_sink_size,
+            kv_window_tokens=args.streaming_window_size,
         )
         model = load_and_offload(args.model, offload_config=cfg)
         tokenizer = AutoTokenizer.from_pretrained(args.model)

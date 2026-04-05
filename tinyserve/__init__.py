@@ -14,12 +14,14 @@ __all__ = [
     "load_from_gguf",
     "load_and_offload",
     "offload_model",
+    "OffloadConfig",
     "TinyserveConfig",
     "OffloadedLM",
 ]
 
 from .gguf_loader import load_from_gguf as load_from_gguf
-from .offload import OffloadedLM as OffloadedLM
-from .offload import TinyserveConfig as TinyserveConfig
-from .offload import load_and_offload as load_and_offload
-from .offload import offload_model as offload_model
+from .engine import OffloadedLM as OffloadedLM
+from .engine import OffloadConfig as OffloadConfig
+from .engine import OffloadConfig as TinyserveConfig  # backward-compat
+from .engine import load_and_offload as load_and_offload
+from .engine import offload_model as offload_model

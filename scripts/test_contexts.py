@@ -12,7 +12,7 @@ import time
 import torch
 from transformers import AutoTokenizer
 
-from tinyserve.offload import TinyserveConfig, load_and_offload
+from tinyserve.engine import OffloadConfig, load_and_offload
 from tinyserve.static_kv_cache import StaticKVCache
 from tinyserve.chunked import chunked_prefill, generate_chunked
 
@@ -191,10 +191,10 @@ def main():
     print(f"Streaming: {args.streaming} (sink={args.streaming_sink_size}, window={args.streaming_window_size})")
     print()
 
-    cfg = TinyserveConfig(
-        streaming=args.streaming,
-        streaming_sink_size=args.streaming_sink_size,
-        streaming_window_size=args.streaming_window_size,
+    cfg = OffloadConfig(
+        sliding_window_kv=args.streaming,
+        kv_sink_tokens=args.streaming_sink_size,
+        kv_window_tokens=args.streaming_window_size,
     )
     model = load_and_offload(
         args.model,
