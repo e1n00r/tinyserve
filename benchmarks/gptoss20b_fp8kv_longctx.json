@@ -1,0 +1,42 @@
+[
+  {
+    "context": 0,
+    "status": "OK",
+    "prefill_ms": 1296.0,
+    "decode_tps": 30.98,
+    "decode_ms": 32.3,
+    "kv_seq_len": 14
+  },
+  {
+    "context": 4096,
+    "status": "OK",
+    "prefill_ms": 13943.0,
+    "decode_tps": 24.69,
+    "decode_ms": 40.5,
+    "kv_seq_len": 4109
+  },
+  {
+    "context": 8192,
+    "status": "OK",
+    "prefill_ms": 27633.0,
+    "decode_tps": 22.57,
+    "decode_ms": 44.3,
+    "kv_seq_len": 8205
+  },
+  {
+    "context": 16384,
+    "status": "OK",
+    "prefill_ms": 54212.0,
+    "decode_tps": 20.06,
+    "decode_ms": 49.8,
+    "kv_seq_len": 16397
+  },
+  {
+    "context": 32768,
+    "status": "OK",
+    "prefill_ms": 107531.0,
+    "decode_tps": 16.51,
+    "decode_ms": 60.6,
+    "kv_seq_len": 32781
+  }
+]

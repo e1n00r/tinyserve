@@ -8,19 +8,23 @@ All numbers from **RTX PRO 2000 8 GB laptop GPU**, GPT-OSS-20B (MXFP4, 24 layers
 
 ### Decode throughput vs context length
 
-| Context | tok/s | ms/tok | Prefill |
-|---|---|---|---|
-| 0 (decode-only) | 31.2 | 32 ms | — |
-| 256 | 30.0 | 33 ms | 1.4 s |
-| 512 | 30.2 | 33 ms | 1.7 s |
-| 1 024 | 30.4 | 33 ms | 3.4 s |
-| 2 048 | 29.9 | 33 ms | 7.0 s |
-| 4 096 | 31.9 | 31 ms | 13.9 s |
-| 8 192 *(StreamingLLM)* | 29.7 | 34 ms | 28 s |
-| 16 384 *(StreamingLLM)* | 29.8 | 34 ms | 57 s |
-| 32 768 *(StreamingLLM)* | 29.4 | 34 ms | 114 s |
+KV cache stored in **FP8** (default) — 50% less VRAM than BF16, enabling 53K token contexts on 8 GB.
 
-Throughput is **flat** — adding context costs only prefill time, not decode speed.
+| Context | Mode | tok/s | Prefill |
+|---|---|---|---|
+| 0 | — | 31.0 | 1.3 s |
+| 4 096 | Full attention | 24.7 | 14 s |
+| 8 192 | Full attention | 22.6 | 28 s |
+| 16 384 | Full attention | 20.1 | 54 s |
+| **32 768** | **Full attention** | **16.5** | **108 s** |
+| 8 192 | StreamingLLM (w=2048) | 29.7 | 28 s |
+| 16 384 | StreamingLLM (w=2048) | 29.8 | 57 s |
+| 32 768 | StreamingLLM (w=2048) | 29.4 | 114 s |
+
+**Full attention** — model sees the entire context, decode cost is O(n).
+**StreamingLLM** — flat 29 tok/s at any length, but attention window is capped at 2 048 tokens.
+
+Max context without StreamingLLM: **~53K tokens** (FP8 KV) vs **~26K tokens** (BF16 KV).
 
 **HuggingFace baseline (device_map="auto"):** 0.19 tok/s — 155× slower.
 
