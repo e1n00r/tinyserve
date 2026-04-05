@@ -16,7 +16,7 @@ from typing import Any, NamedTuple
 
 import torch
 
-from ._model_hooks import OffloadedModel
+from .model_hooks import OffloadedModel
 from .model_registry import profile_from_config
 
 

@@ -217,7 +217,7 @@ def _build_mxfp4_inline_forward(layout, act_fn):
     ds_sz = layout.sizes["down_proj_scales"]
     ds_shape = specs["down_proj_scales"][0]
 
-    from ._model_hooks import _mxfp4_linear
+    from .model_hooks import _mxfp4_linear
 
     if act_fn is not None:
 
