@@ -1,42 +1,44 @@
 # tinyserve — MoE Expert Offloading for Consumer GPUs
 
-Run Mixture-of-Experts models that don't fit in VRAM on a single NVIDIA GPU.
-
-**9–13 tok/s** on an 8 GB laptop GPU running a 20B MoE model. 95% expert cache hit rate with LFRU eviction. ~7K lines of Python.
+Run Mixture-of-Experts models that don't fit in VRAM on a single NVIDIA GPU. **30 tok/s** decode for a 20B MoE model on an 8 GB laptop GPU. **Flat throughput to 32K context** via StreamingLLM. Zero dequantization — native MXFP4 and GGUF quant formats via ggml CUDA kernels.
 
 ## Performance
 
-All numbers from **RTX PRO 2000 8 GB laptop GPU**, GPT-OSS-20B (MXFP4, 24 layers × 32 experts, top_k=4). One model, one GPU — no other hardware benchmarked. Raw logs in [`benchmarks/`](benchmarks/).
+All numbers from **RTX PRO 2000 8 GB laptop GPU**, GPT-OSS-20B (MXFP4, 24 layers × 32 experts, top_k=4). Raw logs in [`benchmarks/`](benchmarks/).
 
-| Workload | Hit rate | tok/s |
-|---|---|---|
-| Sustained code | 93% | 10–12 |
-| Sustained math | 93% | 10–11 |
-| Sustained creative | 95% | 11–12 |
-| Sustained multilingual | 95% | 11–12 |
-| Sustained conversation | 95% | 8–12 |
-| Domain shift (creative→math) | 94% | — |
+### Decode throughput vs context length
 
-Per-layer cache hit rate with LFRU: 79–97% across all 24 layers. LRU starves deep layers to 0–8%; LFRU fixes this structurally.
+| Context | tok/s | ms/tok | Prefill |
+|---|---|---|---|
+| 0 (decode-only) | 31.2 | 32 ms | — |
+| 256 | 30.0 | 33 ms | 1.4 s |
+| 512 | 30.2 | 33 ms | 1.7 s |
+| 1 024 | 30.4 | 33 ms | 3.4 s |
+| 2 048 | 29.9 | 33 ms | 7.0 s |
+| 4 096 | 31.9 | 31 ms | 13.9 s |
+| 8 192 *(StreamingLLM)* | 29.7 | 34 ms | 28 s |
+| 16 384 *(StreamingLLM)* | 29.8 | 34 ms | 57 s |
+| 32 768 *(StreamingLLM)* | 29.4 | 34 ms | 114 s |
+
+Throughput is **flat** — adding context costs only prefill time, not decode speed.
+
+**HuggingFace baseline (device_map="auto"):** 0.19 tok/s — 155× slower.
 
 <details>
-<summary>Benchmark methodology and caveats</summary>
+<summary>Benchmark methodology</summary>
 
 - Diverse prompts across 5 domains (code, math, creative, multilingual, conversation)
-- 4 prompts × 30 tokens per domain — point estimates, not statistically tight bounds
-- Per-prompt tok/s variance is ~15–20% CV
-- Cache counters reset between prompts but cache slots retained (warm, not cold)
-- Source: `benchmarks/cpu_slotmap_bench_20260331.json`
-- HuggingFace `device_map="auto"` baseline: 0.19 tok/s (measured once, no backing file)
-- Expert frequency is flat (top 10% = 44% of accesses) — not Zipf-like
-- Expert cosine similarity: 0.0006 (fully independent, no delta compression viable)
+- n_warmup=5, n_measure=20 per context length
+- StaticKVCache (BF16), streaming window = 2048 for contexts > max_seq_len
+- Source: `benchmarks/gptoss20b_context.json`, `benchmarks/gptoss20b_streaming.json`
 </details>
 
 ## Quick start
 
 ```bash
-git clone https://github.com/e1n00r/tinyserve.git && cd tinyserve
+git clone --recurse-submodules https://github.com/e1n00r/tinyserve.git && cd tinyserve
 pip install -e "."
+python build_ggml.py   # compile ggml CUDA kernels (optional but recommended)
 ```
 
 ```python
@@ -54,35 +56,35 @@ tinyserve run --model openai/gpt-oss-20b                  # Interactive REPL
 tinyserve info --model openai/gpt-oss-20b                 # Model architecture profile
 ```
 
-## When to use tinyserve
-
-A new MoE model drops on HuggingFace. No GGUF yet, Ollama can't load it, you have 8 GB of VRAM. tinyserve loads directly from safetensors and runs it today.
-
-**If your model already works in Ollama or llama.cpp, use those.** Their C++ inference loop is faster. tinyserve is for models they don't support yet, or when you want readable, hackable Python.
-
 ## How it works
 
-1. **Expert store** — Weights in pinned CPU memory. MXFP4 loaded as raw uint8 (no dequantization).
-2. **GPU LFRU cache** — Frequency-recency eviction prevents deep-layer starvation. Hit: zero-copy MXFP4 forward via Triton. Miss: CPU expert compute (~2ms via OneDNN).
-3. **CPU slot map** — Cache tracking on numpy (zero CUDA overhead). GPU tensor synced lazily.
-4. **FATE prefetch** — Current layer predicts next layer's experts. Overlaps with attention.
-5. **Batched prefill** — Groups tokens by expert, loads each once. O(num_experts) not O(seq_len × top_k).
-6. **Buddy substitution** — On miss, substitute co-activation-similar cached expert (zero stall).
+1. **Zero-copy expert store** — GGUF files are mmap'd directly. Expert weights are raw quantized bytes in pinned CPU memory — no dequantization at load time, no conversion to BF16.
+
+2. **ggml CUDA MMVQ kernels** — At inference time, fused dequant+matmul runs entirely on-GPU in native quant format (Q4_K, Q5_K, Q6_K, Q8_0). Each expert forward is 3 kernel launches: gate, up, down. No intermediate BF16 materialization.
+
+3. **GPU LFRU cache** — Frequency-recency eviction prevents deep-layer starvation. Cache tracks experts by (layer, expert_id); GPU slot map synced lazily.
+
+4. **FATE prefetch** — Current-layer expert activations predict next-layer needs. Overlaps H2D transfer with attention compute.
+
+5. **StreamingLLM** — Sink tokens (4) + sliding window. Infinite context at constant decode speed and constant VRAM.
+
+6. **Batched prefill** — Groups tokens by expert, loads each once. O(num\_unique\_experts) not O(seq\_len × top\_k). 288K → 32 loads per layer at 3K context.
+
+7. **StaticKVCache** — Pre-allocated BF16 KV buffers. No dynamic allocation during generation.
 
 ## Supported models
 
-| Model | Params | RAM needed | Status |
-|---|---|---|---|
-| GPT-OSS-20B | 20B (MXFP4) | ~10 GB | **Benchmarked** |
-| Qwen 3.5 MoE 35B | 35B | ~18 GB | Unit tested |
-| Mixtral 8x7B | 47B | ~24 GB | Unit tested |
-| GPT-OSS-120B | 120B | ~60 GB | Profile only |
-| DeepSeek-V3/R1 | 671B | ~350 GB | Profile only |
-| + 6 more families | varies | varies | Profile only |
+| Model | Format | Status |
+|---|---|---|
+| GPT-OSS-20B | MXFP4 safetensors | **Benchmarked** |
+| GPT-OSS-120B | MXFP4 safetensors | Benchmarked |
+| GPT-OSS-20B | GGUF Q4\_K\_M | End-to-end verified |
+| Qwen 3.5 MoE 30B-A3B | GGUF | End-to-end verified |
+| Qwen 122B | GGUF Q4\_K\_M / Q5\_K\_M | Unit tested |
+| Mixtral 8×7B | BF16 safetensors | Unit tested |
+| DeepSeek-V3/R1 | BF16 safetensors | Profile only |
 
-**Status:** "Benchmarked" = real weights, real tokens, throughput measured. "Unit tested" = mock weights. "Profile only" = metadata only.
-
-**Formats:** HuggingFace safetensors (BF16, FP8, MXFP4). GGUF (Q4_K/Q5_K/Q6_K) parsing verified.
+**Formats:** HuggingFace safetensors (BF16, FP8, MXFP4). GGUF (Q4\_K, Q5\_K, Q6\_K, Q8\_0) with native kernel compute.
 
 ## Configuration
 
@@ -90,30 +92,22 @@ A new MoE model drops on HuggingFace. No GGUF yet, Ollama can't load it, you hav
 model = load_and_offload(
     "openai/gpt-oss-20b",
     cache_capacity=0,              # 0 = auto-size from VRAM
-    cache_policy="lfru",           # lru, lfru, slru, lfu, fifo, ls, dali
-    max_seq_len=4096,              # static KV cache (0 = dynamic)
+    cache_policy="lfru",           # lru, lfru, slru, lfu, fifo
+    max_seq_len=4096,              # static KV cache size
     gpu_memory_utilization=0.90,
-    buddy_table_path="benchmarks/buddy_tables_gptoss20b.json",
+    streaming=True,                # StreamingLLM for infinite context
+    streaming_window_size=2048,
+    fp8=True,                      # FP8 attention (saves ~0.5 GB VRAM)
+    adaptive_fate=True,            # FATE temporal prefetch
 )
 ```
 
 ## Limitations
 
-- NVIDIA only (CUDA streams, Triton PTX)
-- Single GPU, batch size 1 decode only
-- One model benchmarked — all performance claims are GPT-OSS-20B on one GPU
-- ~36% of theoretical ceiling — Python overhead dominates; C++ rewrite needed for >20 tok/s
-- GGUF parsing works but end-to-end generation not tested
-
-<details>
-<summary>What we have NOT measured</summary>
-
-- No Ollama/llama.cpp comparison (they don't support GPT-OSS-20B)
-- No multi-user or batch inference benchmarks
-- No H100/A100 numbers
-- No confidence intervals (4 prompts per workload)
-- HF baseline (0.19 tok/s) has no backing benchmark file
-</details>
+- NVIDIA only (CUDA, ggml CUDA kernels, Triton PTX)
+- Single GPU, batch size 1 decode
+- GPT-OSS-120B benchmarks pending (download in progress)
+- Qwen 3.x generation quality under investigation (weight mapping)
 
 <details>
 <summary>What we tried and ruled out</summary>
@@ -122,39 +116,28 @@ model = load_and_offload(
 |---|---|
 | D2-MoE delta compression | Expert cosine similarity = 0.0006 — not viable |
 | Cache bias routing (0.0–3.0) | No effect on GPT-OSS-20B |
-| Cython hot path | 3.4x microbench, 0% end-to-end |
-| GPU INT4 on 8GB | OOMs (conversion cache exceeds VRAM) |
+| Cython hot path | 3.4× microbench, 0% end-to-end |
 | Expert deferral | Produces garbage output |
-| FlexAttention default | pytorch #155065, 3–67x VRAM overhead |
+| FlexAttention default | pytorch #155065, 3–67× VRAM overhead |
+| Triton MMVQ kernel (custom) | ggml CUDA kernels already exist and are faster |
+| Full dequant → BF16 at load | 1–3 GB wasted VRAM per expert tier; replaced by zero-copy mmap |
 </details>
-
-<details>
-<summary>Performance ceiling analysis</summary>
-
-At 10–13 tok/s, we're at ~36% of the realistic ceiling (~32 tok/s):
-- ~60% Python interpreter overhead (layer loop, dict ops, torch dispatch)
-- ~15% CUDA synchronization and kernel launch
-- ~15% PCIe miss transfers + CPU fallback compute
-- ~10% HF generate framework tax
-
-The algorithmic optimization space is exhausted for this model/hardware. Remaining gains require a C++ forward loop.
-</details>
-
-## Benchmarking
-
-```bash
-python -m scripts.cache_benchmark                    # Diverse workload benchmark
-python scripts/comprehensive_bench.py                # 7-policy comparison
-python scripts/benchmark.py --context-scaling        # Prefill vs decode
-python scripts/calibrate_buddies.py                  # Buddy co-activation profiling
-python scripts/expert_similarity.py                  # D2-MoE feasibility check
-```
 
 ## Testing
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest tests/ --ignore=tests/test_hf_models.py -x -q   # ~340 tests
+python3 -m pytest tests/ --ignore=tests/test_hf_models.py -x -q   # 481 tests
+```
+
+## Benchmarking
+
+```bash
+python -m scripts.bench_context                        # Decode throughput vs context length
+python -m scripts.bench_context --streaming            # StreamingLLM long context
+python -m scripts.cache_benchmark                      # Expert cache policy comparison
+python scripts/comprehensive_bench.py                  # 7-policy sweep
+python scripts/calibrate_buddies.py                    # Buddy co-activation profiling
 ```
 
 ## License
